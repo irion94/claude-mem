@@ -7,6 +7,8 @@
 
 import express, { Request, Response } from 'express';
 import { getWorkerPort } from '../../../../shared/worker-utils.js';
+import { SettingsDefaultsManager } from '../../../../shared/SettingsDefaultsManager.js';
+import { USER_SETTINGS_PATH } from '../../../../shared/paths.js';
 import { logger } from '../../../../utils/logger.js';
 import { stripMemoryTagsFromJson, stripMemoryTagsFromPrompt } from '../../../../utils/tag-stripping.js';
 import { SessionManager } from '../../SessionManager.js';
@@ -17,6 +19,24 @@ import { OpenRouterAgent, isOpenRouterSelected, isOpenRouterAvailable } from '..
 import type { WorkerService } from '../../../worker-service.js';
 import { BaseRouteHandler } from '../BaseRouteHandler.js';
 import { SessionEventBroadcaster } from '../../events/SessionEventBroadcaster.js';
+
+/**
+ * Baton fork: resolve the session wall-clock limit from settings.
+ * Hours scale to ms; 0 or negative disables the guard (returns 0);
+ * an unparsable value falls back to the upstream 4h default (#1590).
+ */
+export function resolveSessionMaxAgeMs(
+  settings: { CLAUDE_MEM_SESSION_MAX_AGE_HOURS?: string }
+): number {
+  const hours = parseFloat(settings.CLAUDE_MEM_SESSION_MAX_AGE_HOURS ?? '');
+  if (!Number.isFinite(hours)) {
+    return 4 * 60 * 60 * 1000;
+  }
+  if (hours <= 0) {
+    return 0;
+  }
+  return hours * 60 * 60 * 1000;
+}
 import { SessionCompletionHandler } from '../../session/SessionCompletionHandler.js';
 import { PrivacyCheckValidator } from '../../validation/PrivacyCheckValidator.js';
 import { SettingsDefaultsManager } from '../../../../shared/SettingsDefaultsManager.js';
@@ -95,7 +115,8 @@ export class SessionRoutes extends BaseRouteHandler {
    * The next generator will use the new provider with shared conversationHistory.
    */
   private static readonly STALE_GENERATOR_THRESHOLD_MS = 30_000; // 30 seconds (#1099)
-  private static readonly MAX_SESSION_WALL_CLOCK_MS = 4 * 60 * 60 * 1000; // 4 hours (#1590)
+  // Baton fork: the 4h wall-clock limit (#1590) moved to settings —
+  // CLAUDE_MEM_SESSION_MAX_AGE_HOURS, resolved by resolveSessionMaxAgeMs().
 
   private ensureGeneratorRunning(sessionDbId: number, source: string): void {
     const session = this.sessionManager.getSession(sessionDbId);
@@ -110,11 +131,14 @@ export class SessionRoutes extends BaseRouteHandler {
       .get(sessionDbId) as { started_at_epoch: number } | undefined;
     const sessionOriginMs = dbSessionRecord?.started_at_epoch ?? session.startTime;
     const sessionAgeMs = Date.now() - sessionOriginMs;
-    if (sessionAgeMs > SessionRoutes.MAX_SESSION_WALL_CLOCK_MS) {
+    const maxSessionAgeMs = resolveSessionMaxAgeMs(
+      SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH)
+    );
+    if (maxSessionAgeMs > 0 && sessionAgeMs > maxSessionAgeMs) {
       logger.warn('SESSION', 'Session exceeded wall-clock age limit — aborting to prevent runaway spend', {
         sessionId: sessionDbId,
         ageHours: Math.round(sessionAgeMs / 3_600_000 * 10) / 10,
-        limitHours: SessionRoutes.MAX_SESSION_WALL_CLOCK_MS / 3_600_000,
+        limitHours: maxSessionAgeMs / 3_600_000,
         source
       });
       if (!session.abortController.signal.aborted) {
