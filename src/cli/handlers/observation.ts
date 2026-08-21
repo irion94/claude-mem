@@ -8,9 +8,9 @@ import type { EventHandler, NormalizedHookInput, HookResult } from '../types.js'
 import { ensureWorkerRunning, workerHttpRequest } from '../../shared/worker-utils.js';
 import { logger } from '../../utils/logger.js';
 import { HOOK_EXIT_CODES } from '../../shared/hook-constants.js';
-import { isProjectExcluded } from '../../utils/project-filter.js';
+import { isProjectExcluded, isSelfObserverCwd } from '../../utils/project-filter.js';
 import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
-import { USER_SETTINGS_PATH } from '../../shared/paths.js';
+import { DATA_DIR, USER_SETTINGS_PATH } from '../../shared/paths.js';
 import { normalizePlatformSource } from '../../shared/platform-source.js';
 
 async function sendObservationToWorker(requestBody: string, toolName: string): Promise<void> {
@@ -30,6 +30,17 @@ async function sendObservationToWorker(requestBody: string, toolName: string): P
 
 export const observationHandler: EventHandler = {
   async execute(input: NormalizedHookInput): Promise<HookResult> {
+    const { sessionId, cwd, toolName, toolInput, toolResponse } = input;
+    const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
+    if (cwd && isSelfObserverCwd(cwd, DATA_DIR)) {
+      logger.debug('HOOK', 'Self-observer cwd, skipping observation', { cwd, toolName });
+      return { continue: true, suppressOutput: true };
+    }
+    if (cwd && isProjectExcluded(cwd, settings.CLAUDE_MEM_EXCLUDED_PROJECTS)) {
+      logger.debug('HOOK', 'Project excluded from tracking, skipping observation', { cwd, toolName });
+      return { continue: true, suppressOutput: true };
+    }
+
     // Ensure worker is running before any other logic
     const workerReady = await ensureWorkerRunning();
     if (!workerReady) {
@@ -37,7 +48,6 @@ export const observationHandler: EventHandler = {
       return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
     }
 
-    const { sessionId, cwd, toolName, toolInput, toolResponse } = input;
     const platformSource = normalizePlatformSource(input.platform);
 
     if (!toolName) {
@@ -52,13 +62,6 @@ export const observationHandler: EventHandler = {
     // Validate required fields before sending to worker
     if (!cwd) {
       throw new Error(`Missing cwd in PostToolUse hook input for session ${sessionId}, tool ${toolName}`);
-    }
-
-    // Check if project is excluded from tracking
-    const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
-    if (isProjectExcluded(cwd, settings.CLAUDE_MEM_EXCLUDED_PROJECTS)) {
-      logger.debug('HOOK', 'Project excluded from tracking, skipping observation', { cwd, toolName });
-      return { continue: true, suppressOutput: true };
     }
 
     // Send to worker - worker handles privacy check and database operations

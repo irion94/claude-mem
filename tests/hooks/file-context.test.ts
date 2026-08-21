@@ -12,7 +12,7 @@ mock.module('../../src/shared/SettingsDefaultsManager.js', () => ({
       return '';
     },
     getInt: () => 0,
-    loadFromFile: () => ({ CLAUDE_MEM_EXCLUDED_PROJECTS: [] }),
+    loadFromFile: () => ({ CLAUDE_MEM_EXCLUDED_PROJECTS: '' }),
   },
 }));
 
@@ -36,6 +36,7 @@ mock.module('../../src/utils/project-name.js', () => ({
 
 mock.module('../../src/utils/project-filter.js', () => ({
   isProjectExcluded: () => false,
+  isSelfObserverCwd: (cwd: string, dataDir: string) => cwd === dataDir || cwd.startsWith(`${dataDir}/`),
 }));
 
 // Import after mocks

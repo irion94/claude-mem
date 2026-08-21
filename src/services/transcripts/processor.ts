@@ -4,8 +4,10 @@ import { observationHandler } from '../../cli/handlers/observation.js';
 import { fileEditHandler } from '../../cli/handlers/file-edit.js';
 import { sessionCompleteHandler } from '../../cli/handlers/session-complete.js';
 import { ensureWorkerRunning, workerHttpRequest } from '../../shared/worker-utils.js';
-import { DATA_DIR } from '../../shared/paths.js';
+import { DATA_DIR, USER_SETTINGS_PATH } from '../../shared/paths.js';
+import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
 import { logger } from '../../utils/logger.js';
+import { isProjectExcluded, isSelfObserverCwd } from '../../utils/project-filter.js';
 import { getProjectContext } from '../../utils/project-name.js';
 import { writeAgentsMd } from '../../utils/agents-md-utils.js';
 import { resolveFieldSpec, resolveFields, matchesRule } from './field-utils.js';
@@ -32,16 +34,20 @@ interface PendingTool {
 
 export class TranscriptEventProcessor {
   private sessions = new Map<string, SessionState>();
+  private skippedSessions = new Set<string>();
+  private loggedSkipFiles = new Set<string>();
+  private settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
 
   async processEntry(
     entry: unknown,
     watch: WatchTarget,
     schema: TranscriptSchema,
-    sessionIdOverride?: string | null
+    sessionIdOverride?: string | null,
+    transcriptFile?: string
   ): Promise<void> {
     for (const event of schema.events) {
       if (!matchesRule(entry, event.match, schema)) continue;
-      await this.handleEvent(entry, watch, schema, event, sessionIdOverride ?? undefined);
+      await this.handleEvent(entry, watch, schema, event, sessionIdOverride ?? undefined, transcriptFile);
     }
   }
 
@@ -115,7 +121,8 @@ export class TranscriptEventProcessor {
     watch: WatchTarget,
     schema: TranscriptSchema,
     event: SchemaEvent,
-    sessionIdOverride?: string
+    sessionIdOverride?: string,
+    transcriptFile?: string
   ): Promise<void> {
     const sessionId = this.resolveSessionId(entry, watch, schema, event, sessionIdOverride);
     if (!sessionId) {
@@ -123,8 +130,26 @@ export class TranscriptEventProcessor {
       return;
     }
 
+    const sessionKey = this.getSessionKey(watch, sessionId);
+    if (this.skippedSessions.has(sessionKey)) return;
+
     const session = this.getOrCreateSession(watch, sessionId);
     const cwd = this.resolveCwd(entry, watch, schema, event, session);
+    const skipReason = cwd && isSelfObserverCwd(cwd, DATA_DIR)
+      ? 'self-observer'
+      : cwd && isProjectExcluded(cwd, this.settings.CLAUDE_MEM_EXCLUDED_PROJECTS)
+        ? 'excluded'
+        : null;
+    if (cwd && skipReason) {
+      this.skippedSessions.add(sessionKey);
+      this.sessions.delete(sessionKey);
+      const logKey = transcriptFile ?? sessionKey;
+      if (!this.loggedSkipFiles.has(logKey)) {
+        this.loggedSkipFiles.add(logKey);
+        logger.info('TRANSCRIPT', `SKIP ${skipReason}: ${cwd}`, { cwd, file: transcriptFile });
+      }
+      return;
+    }
     if (cwd) session.cwd = cwd;
     const project = this.resolveProject(entry, watch, schema, event, session);
     if (project) session.project = project;

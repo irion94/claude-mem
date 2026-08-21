@@ -9,6 +9,10 @@ import { basename } from 'path';
 import type { EventHandler, NormalizedHookInput, HookResult } from '../types.js';
 import { ensureWorkerRunning, getWorkerPort, workerHttpRequest } from '../../shared/worker-utils.js';
 import { HOOK_EXIT_CODES } from '../../shared/hook-constants.js';
+import { logger } from '../../utils/logger.js';
+import { isProjectExcluded, isSelfObserverCwd } from '../../utils/project-filter.js';
+import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
+import { DATA_DIR, USER_SETTINGS_PATH } from '../../shared/paths.js';
 
 async function fetchAndDisplayContext(project: string, colorsParam: string, port: number): Promise<void> {
   const response = await workerHttpRequest(
@@ -31,6 +35,17 @@ async function fetchAndDisplayContext(project: string, colorsParam: string, port
 
 export const userMessageHandler: EventHandler = {
   async execute(input: NormalizedHookInput): Promise<HookResult> {
+    const cwd = input.cwd ?? process.cwd();
+    const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
+    if (isSelfObserverCwd(cwd, DATA_DIR)) {
+      logger.debug('HOOK', 'Self-observer cwd, skipping user message', { cwd });
+      return { continue: true, suppressOutput: true };
+    }
+    if (isProjectExcluded(cwd, settings.CLAUDE_MEM_EXCLUDED_PROJECTS)) {
+      logger.debug('HOOK', 'Project excluded from tracking, skipping user message', { cwd });
+      return { continue: true, suppressOutput: true };
+    }
+
     // Ensure worker is running
     const workerReady = await ensureWorkerRunning();
     if (!workerReady) {
@@ -39,7 +54,7 @@ export const userMessageHandler: EventHandler = {
     }
 
     const port = getWorkerPort();
-    const project = basename(input.cwd ?? process.cwd());
+    const project = basename(cwd);
     const colorsParam = input.platform === 'claude-code' ? '&colors=true' : '';
 
     try {

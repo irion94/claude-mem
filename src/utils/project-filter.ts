@@ -6,6 +6,24 @@
  */
 
 import { homedir } from 'os';
+import path from 'path';
+import { OBSERVER_SESSIONS_DIR } from '../shared/paths.js';
+
+function resolvePath(inputPath: string): string {
+  const trimmed = inputPath.trim();
+  const expanded = trimmed === '~' || trimmed.startsWith('~/') || trimmed.startsWith('~\\')
+    ? homedir() + trimmed.slice(1)
+    : trimmed;
+  return path.resolve(expanded);
+}
+
+/** Return true when cwd is the claude-mem data directory or one of its descendants. */
+export function isSelfObserverCwd(cwd: string, dataDir: string): boolean {
+  const resolvedCwd = resolvePath(cwd);
+  const roots = [resolvePath(dataDir), resolvePath(OBSERVER_SESSIONS_DIR)];
+
+  return roots.some(root => resolvedCwd === root || resolvedCwd.startsWith(root + path.sep));
+}
 
 /**
  * Convert a glob pattern to a regular expression

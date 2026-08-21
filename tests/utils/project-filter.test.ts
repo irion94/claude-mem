@@ -6,10 +6,31 @@
  */
 
 import { describe, it, expect } from 'bun:test';
-import { isProjectExcluded } from '../../src/utils/project-filter.js';
+import { isProjectExcluded, isSelfObserverCwd } from '../../src/utils/project-filter.js';
 import { homedir } from 'os';
+import { join } from 'path';
+import { OBSERVER_SESSIONS_DIR } from '../../src/shared/paths.js';
 
 describe('Project Filter', () => {
+  describe('isSelfObserverCwd', () => {
+    const dataDir = join('/tmp', 'claude-mem-test');
+
+    it('matches the data directory and its descendants', () => {
+      expect(isSelfObserverCwd(dataDir, dataDir)).toBe(true);
+      expect(isSelfObserverCwd(`${dataDir}/`, dataDir)).toBe(true);
+      expect(isSelfObserverCwd(join(dataDir, 'logs'), dataDir)).toBe(true);
+    });
+
+    it('matches the observer sessions directory', () => {
+      expect(isSelfObserverCwd(OBSERVER_SESSIONS_DIR, dataDir)).toBe(true);
+    });
+
+    it('does not match unrelated or home directories', () => {
+      expect(isSelfObserverCwd('/tmp/project', dataDir)).toBe(false);
+      expect(isSelfObserverCwd(homedir(), dataDir)).toBe(false);
+    });
+  });
+
   describe('isProjectExcluded', () => {
     describe('with empty patterns', () => {
       it('returns false for empty pattern string', () => {

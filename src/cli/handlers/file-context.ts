@@ -11,9 +11,9 @@ import { logger } from '../../utils/logger.js';
 import { parseJsonArray } from '../../shared/timeline-formatting.js';
 import { statSync } from 'fs';
 import path from 'path';
-import { isProjectExcluded } from '../../utils/project-filter.js';
+import { isProjectExcluded, isSelfObserverCwd } from '../../utils/project-filter.js';
 import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
-import { USER_SETTINGS_PATH } from '../../shared/paths.js';
+import { DATA_DIR, USER_SETTINGS_PATH } from '../../shared/paths.js';
 import { getProjectContext } from '../../utils/project-name.js';
 
 /** Skip the gate for files smaller than this — timeline overhead exceeds file read cost. */
@@ -209,6 +209,10 @@ export const fileContextHandler: EventHandler = {
 
     // Check if project is excluded from tracking
     const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
+    if (input.cwd && isSelfObserverCwd(input.cwd, DATA_DIR)) {
+      logger.debug('HOOK', 'Self-observer cwd, skipping file context', { cwd: input.cwd });
+      return { continue: true, suppressOutput: true };
+    }
     if (input.cwd && isProjectExcluded(input.cwd, settings.CLAUDE_MEM_EXCLUDED_PROJECTS)) {
       logger.debug('HOOK', 'Project excluded from tracking, skipping file context', { cwd: input.cwd });
       return { continue: true, suppressOutput: true };

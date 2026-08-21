@@ -12,6 +12,9 @@ import { logger } from '../../utils/logger.js';
 import { extractLastMessage } from '../../shared/transcript-parser.js';
 import { HOOK_EXIT_CODES } from '../../shared/hook-constants.js';
 import { normalizePlatformSource } from '../../shared/platform-source.js';
+import { isProjectExcluded, isSelfObserverCwd } from '../../utils/project-filter.js';
+import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
+import { DATA_DIR, USER_SETTINGS_PATH } from '../../shared/paths.js';
 
 const SUMMARIZE_TIMEOUT_MS = 5000;
 
@@ -29,6 +32,17 @@ export const summarizeHandler: EventHandler = {
         agentType: input.agentType
       });
       return { continue: true, suppressOutput: true, exitCode: HOOK_EXIT_CODES.SUCCESS };
+    }
+
+    const cwd = input.cwd ?? process.cwd();
+    const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
+    if (isSelfObserverCwd(cwd, DATA_DIR)) {
+      logger.debug('HOOK', 'Self-observer cwd, skipping summary', { cwd });
+      return { continue: true, suppressOutput: true };
+    }
+    if (isProjectExcluded(cwd, settings.CLAUDE_MEM_EXCLUDED_PROJECTS)) {
+      logger.debug('HOOK', 'Project excluded from tracking, skipping summary', { cwd });
+      return { continue: true, suppressOutput: true };
     }
 
     // Ensure worker is running before any other logic

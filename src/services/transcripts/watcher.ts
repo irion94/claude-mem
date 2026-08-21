@@ -218,7 +218,7 @@ export class TranscriptWatcher {
   ): Promise<void> {
     try {
       const entry = JSON.parse(line);
-      await this.processor.processEntry(entry, watch, schema, sessionIdOverride ?? undefined);
+      await this.processor.processEntry(entry, watch, schema, sessionIdOverride ?? undefined, filePath);
     } catch (error: unknown) {
       if (error instanceof Error) {
         logger.debug('TRANSCRIPT', 'Failed to parse transcript line', {
