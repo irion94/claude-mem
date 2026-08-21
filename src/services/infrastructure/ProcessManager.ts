@@ -762,6 +762,7 @@ export function runOneTimeChromaMigration(dataDirectory?: string): void {
 }
 
 const CWD_REMAP_MARKER_FILENAME = '.cwd-remap-applied-v1';
+const BARE_WORKTREE_PROJECT_MARKER_FILENAME = '.bare-worktree-project-remap-applied-v1';
 
 type CwdClassification =
   | { kind: 'main'; project: string }
@@ -923,6 +924,121 @@ function executeCwdRemap(dbPath: string, effectiveDataDir: string, markerPath: s
     mkdirSync(effectiveDataDir, { recursive: true });
     writeFileSync(markerPath, new Date().toISOString());
     logger.info('SYSTEM', 'cwd-remap marker written', { markerPath });
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * One-time repair for worktree project keys written without their parent repo
+ * prefix by fork hooks that accidentally launched the upstream cached plugin.
+ * Only bare keys containing `+` are candidates; rows without a resolvable
+ * persisted cwd are deliberately left untouched.
+ */
+export function runOneTimeBareWorktreeProjectMigration(dataDirectory?: string): void {
+  const effectiveDataDir = dataDirectory ?? DATA_DIR;
+  const markerPath = path.join(effectiveDataDir, BARE_WORKTREE_PROJECT_MARKER_FILENAME);
+  const dbPath = path.join(effectiveDataDir, 'claude-mem.db');
+
+  if (existsSync(markerPath)) {
+    logger.debug('SYSTEM', 'bare-worktree-project-remap marker exists, skipping');
+    return;
+  }
+
+  if (!existsSync(dbPath)) {
+    mkdirSync(effectiveDataDir, { recursive: true });
+    writeFileSync(markerPath, new Date().toISOString());
+    logger.debug('SYSTEM', 'No DB present, bare-worktree-project-remap marker written without work', { dbPath });
+    return;
+  }
+
+  try {
+    executeBareWorktreeProjectMigration(dbPath, effectiveDataDir, markerPath);
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    logger.error('SYSTEM', 'bare-worktree-project-remap failed, marker not written (will retry on next startup)', {}, error);
+  }
+}
+
+function executeBareWorktreeProjectMigration(dbPath: string, effectiveDataDir: string, markerPath: string): void {
+  const { Database } = require('bun:sqlite') as typeof import('bun:sqlite');
+  const db = new Database(dbPath);
+
+  try {
+    const hasPendingMessages = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='pending_messages'"
+    ).get() as { name: string } | undefined;
+
+    if (!hasPendingMessages) {
+      mkdirSync(effectiveDataDir, { recursive: true });
+      writeFileSync(markerPath, new Date().toISOString());
+      logger.info('SYSTEM', 'pending_messages table not present, bare-worktree-project-remap skipped');
+      return;
+    }
+
+    const candidates = db.prepare(`
+      SELECT s.id AS session_id, s.memory_session_id, s.project AS old_project, p.cwd
+      FROM sdk_sessions s
+      LEFT JOIN pending_messages p ON p.content_session_id = s.content_session_id
+        AND p.id = (
+          SELECT MIN(p2.id) FROM pending_messages p2
+          WHERE p2.content_session_id = s.content_session_id
+            AND p2.cwd IS NOT NULL AND p2.cwd != ''
+        )
+      WHERE s.project LIKE '%+%' AND s.project NOT LIKE '%/%'
+    `).all() as Array<{
+      session_id: number;
+      memory_session_id: string | null;
+      old_project: string;
+      cwd: string | null;
+    }>;
+
+    type Target = { sessionId: number; memorySessionId: string | null; oldProject: string; newProject: string };
+    const targets: Target[] = [];
+    for (const candidate of candidates) {
+      if (!candidate.cwd) continue;
+      const classification = classifyCwdForRemap(candidate.cwd);
+      if (classification.kind !== 'worktree') continue;
+      const repoName = classification.project.split('/')[0];
+      targets.push({
+        sessionId: candidate.session_id,
+        memorySessionId: candidate.memory_session_id,
+        oldProject: candidate.old_project,
+        newProject: `${repoName}/${candidate.old_project}`
+      });
+    }
+
+    let sessions = 0;
+    let observations = 0;
+    let summaries = 0;
+    const updateSession = db.prepare('UPDATE sdk_sessions SET project = ? WHERE id = ?');
+    const updateObservations = db.prepare("UPDATE observations SET project = ? WHERE memory_session_id = ? AND project LIKE '%+%' AND project NOT LIKE '%/%'");
+    const updateSummaries = db.prepare("UPDATE session_summaries SET project = ? WHERE memory_session_id = ? AND project LIKE '%+%' AND project NOT LIKE '%/%'");
+    const migrate = db.transaction(() => {
+      for (const target of targets) {
+        sessions += updateSession.run(target.newProject, target.sessionId).changes;
+        if (target.memorySessionId) {
+          observations += updateObservations.run(target.newProject, target.memorySessionId).changes;
+          summaries += updateSummaries.run(target.newProject, target.memorySessionId).changes;
+        }
+      }
+    });
+    migrate();
+
+    const unresolvedSessions = (db.prepare("SELECT COUNT(*) AS count FROM sdk_sessions WHERE project LIKE '%+%' AND project NOT LIKE '%/%'").get() as { count: number }).count;
+    const unresolvedObservations = (db.prepare("SELECT COUNT(*) AS count FROM observations WHERE project LIKE '%+%' AND project NOT LIKE '%/%'").get() as { count: number }).count;
+    const unresolvedSummaries = (db.prepare("SELECT COUNT(*) AS count FROM session_summaries WHERE project LIKE '%+%' AND project NOT LIKE '%/%'").get() as { count: number }).count;
+
+    mkdirSync(effectiveDataDir, { recursive: true });
+    writeFileSync(markerPath, new Date().toISOString());
+    logger.info('SYSTEM', 'bare-worktree-project-remap applied', {
+      sessions,
+      observations,
+      summaries,
+      unresolvedSessions,
+      unresolvedObservations,
+      unresolvedSummaries
+    });
   } finally {
     db.close();
   }

@@ -47,6 +47,7 @@ import {
   aggressiveStartupCleanup,
   runOneTimeChromaMigration,
   runOneTimeCwdRemap,
+  runOneTimeBareWorktreeProjectMigration,
   cleanStalePidFile,
   verifyPidFileOwnership,
   spawnDaemon,
@@ -377,6 +378,7 @@ export class WorkerService {
       // One-time remap of pre-worktree project names using pending_messages.cwd.
       // Must run before dbManager.initialize() so we don't hold the DB open.
       runOneTimeCwdRemap();
+      runOneTimeBareWorktreeProjectMigration();
 
       // Stamp merged worktrees so their observations surface under the parent
       // project. Runs every startup (not marker-gated) because git state evolves
