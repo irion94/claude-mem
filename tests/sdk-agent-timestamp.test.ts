@@ -45,7 +45,7 @@ describe('SDKAgent source-session timestamp', () => {
     const sessionManager = {
       getMessageIterator: async function* () {
         session.earliestPendingTimestamp = pendingMessage._originalTimestamp;
-        yield pendingMessage;
+        yield { messages: [pendingMessage], reason: "count" as const };
       }
     };
     const mode = {
