@@ -13,6 +13,7 @@
  *   npx claude-mem restart             → restart worker service
  *   npx claude-mem status              → show worker status
  *   npx claude-mem search <query>      → search observations
+ *   npx claude-mem reap-observer-sessions [--apply] → remove observer-loop junk sessions
  *   npx claude-mem transcript watch    → start transcript watcher
  *
  * This file is pure Node.js — Bun is NOT required for install commands.
@@ -53,6 +54,7 @@ ${pc.bold('Runtime Commands')} (requires Bun, delegates to installed plugin):
   ${pc.cyan('npx claude-mem status')}               Show worker status
   ${pc.cyan('npx claude-mem search <query>')}       Search observations
   ${pc.cyan('npx claude-mem adopt [--dry-run] [--branch <name>]')}    Stamp merged worktrees into parent project
+  ${pc.cyan('npx claude-mem reap-observer-sessions [--apply]')}       Preview or remove observer-loop junk sessions
   ${pc.cyan('npx claude-mem transcript watch')}     Start transcript watcher
 
 ${pc.bold('IDE Identifiers')}:
@@ -150,6 +152,13 @@ async function main(): Promise<void> {
     case 'adopt': {
       const { runAdoptCommand } = await import('./commands/runtime.js');
       runAdoptCommand(args.slice(1));
+      break;
+    }
+
+    // -- Reap observer feedback-loop sessions -----------------------------
+    case 'reap-observer-sessions': {
+      const { runReapObserverSessionsCommand } = await import('./commands/runtime.js');
+      runReapObserverSessionsCommand(args.slice(1));
       break;
     }
 

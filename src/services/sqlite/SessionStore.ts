@@ -27,6 +27,23 @@ function resolveCreateSessionArgs(
   };
 }
 
+export interface ObserverJunkSession {
+  sessionDbId: number;
+  contentSessionId: string;
+  memorySessionId: string | null;
+  project: string;
+  startedAt: string;
+  userPrompt: string | null;
+}
+
+export interface ObserverJunkReapCounts {
+  pendingMessages: number;
+  userPrompts: number;
+  observations: number;
+  sessionSummaries: number;
+  sdkSessions: number;
+}
+
 /**
  * Session data store for SDK sessions, observations, and summaries
  * Provides simple, synchronous CRUD operations for session-based memory
@@ -2548,6 +2565,105 @@ export class SessionStore {
     logger.info('SESSION', 'Created manual session', { memorySessionId, project });
 
     return memorySessionId;
+  }
+
+  findObserverJunkSessions(): ObserverJunkSession[] {
+    return this.db.prepare(`
+      SELECT
+        id AS sessionDbId,
+        content_session_id AS contentSessionId,
+        memory_session_id AS memorySessionId,
+        project,
+        started_at AS startedAt,
+        user_prompt AS userPrompt
+      FROM sdk_sessions
+      WHERE project IN ('.claude-mem', 'observer-sessions')
+        OR instr(user_prompt, 'You are a Claude-Mem') = 1
+        OR instr(user_prompt, '<observed_from_primary_session>') = 1
+        OR instr(user_prompt, 'Hello memory agent') = 1
+      ORDER BY started_at_epoch DESC
+    `).all() as ObserverJunkSession[];
+  }
+
+  countObserverJunkSessionRows(sessionDbIds: number[]): ObserverJunkReapCounts {
+    if (sessionDbIds.length === 0) {
+      return {
+        pendingMessages: 0,
+        userPrompts: 0,
+        observations: 0,
+        sessionSummaries: 0,
+        sdkSessions: 0
+      };
+    }
+
+    const placeholders = sessionDbIds.map(() => '?').join(',');
+    const count = (table: string, predicate: string): number => {
+      const row = this.db.prepare(`
+        SELECT COUNT(*) AS count FROM ${table} WHERE ${predicate}
+      `).get(...sessionDbIds) as { count: number };
+      return row.count;
+    };
+    const sessionPredicate = `id IN (${placeholders})`;
+    const contentSessionPredicate = `content_session_id IN (
+      SELECT content_session_id FROM sdk_sessions WHERE ${sessionPredicate}
+    )`;
+    const memorySessionPredicate = `memory_session_id IN (
+      SELECT memory_session_id FROM sdk_sessions WHERE ${sessionPredicate}
+    )`;
+    const pendingMessagePredicate = `EXISTS (
+      SELECT 1 FROM sdk_sessions AS target
+      WHERE target.id IN (${placeholders})
+        AND (
+          target.id = pending_messages.session_db_id
+          OR target.content_session_id = pending_messages.content_session_id
+        )
+    )`;
+
+    return {
+      pendingMessages: count('pending_messages', pendingMessagePredicate),
+      userPrompts: count('user_prompts', contentSessionPredicate),
+      observations: count('observations', memorySessionPredicate),
+      sessionSummaries: count('session_summaries', memorySessionPredicate),
+      sdkSessions: count('sdk_sessions', sessionPredicate)
+    };
+  }
+
+  reapObserverJunkSessions(sessionDbIds: number[]): ObserverJunkReapCounts {
+    if (sessionDbIds.length === 0) {
+      return this.countObserverJunkSessionRows(sessionDbIds);
+    }
+
+    const placeholders = sessionDbIds.map(() => '?').join(',');
+    const reap = this.db.transaction(() => {
+      const deleteRows = (table: string, predicate: string): void => {
+        this.db.prepare(`DELETE FROM ${table} WHERE ${predicate}`).run(...sessionDbIds);
+      };
+      const sessionPredicate = `id IN (${placeholders})`;
+      const contentSessionPredicate = `content_session_id IN (
+        SELECT content_session_id FROM sdk_sessions WHERE ${sessionPredicate}
+      )`;
+      const memorySessionPredicate = `memory_session_id IN (
+        SELECT memory_session_id FROM sdk_sessions WHERE ${sessionPredicate}
+      )`;
+      const pendingMessagePredicate = `EXISTS (
+        SELECT 1 FROM sdk_sessions AS target
+        WHERE target.id IN (${placeholders})
+          AND (
+            target.id = pending_messages.session_db_id
+            OR target.content_session_id = pending_messages.content_session_id
+          )
+      )`;
+
+      const counts = this.countObserverJunkSessionRows(sessionDbIds);
+      deleteRows('pending_messages', pendingMessagePredicate);
+      deleteRows('user_prompts', contentSessionPredicate);
+      deleteRows('observations', memorySessionPredicate);
+      deleteRows('session_summaries', memorySessionPredicate);
+      deleteRows('sdk_sessions', sessionPredicate);
+      return counts;
+    });
+
+    return reap() as ObserverJunkReapCounts;
   }
 
   /**

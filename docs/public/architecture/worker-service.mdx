@@ -606,6 +606,23 @@ npm run worker:logs
 npm run worker:status
 ```
 
+Maintenance commands are available through the installed CLI:
+
+```bash
+# Stamp merged worktree memories into their parent project
+npx claude-mem adopt [--dry-run] [--branch <name>]
+
+# Preview sessions created by the historical observer feedback loop
+npx claude-mem reap-observer-sessions
+
+# Delete those sessions and their SQLite observations, summaries, prompts, and queue rows
+npx claude-mem reap-observer-sessions --apply
+```
+
+`reap-observer-sessions` is a dry run unless `--apply` is supplied. Do not run it concurrently
+with a live worker flush. Chroma documents are not deleted by this command and remain orphaned
+until Chroma is rebuilt.
+
 ### Auto-Start Behavior
 
 The worker service auto-starts when the SessionStart hook fires. Manual start is optional.

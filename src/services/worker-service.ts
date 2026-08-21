@@ -61,6 +61,7 @@ import {
 } from './infrastructure/HealthMonitor.js';
 import { performGracefulShutdown } from './infrastructure/GracefulShutdown.js';
 import { adoptMergedWorktrees, adoptMergedWorktreesForAllKnownRepos } from './infrastructure/WorktreeAdoption.js';
+import { SessionStore, type ObserverJunkReapCounts } from './sqlite/SessionStore.js';
 
 // Server imports
 import { Server } from './server/Server.js';
@@ -1222,6 +1223,37 @@ export async function ensureWorkerStarted(port: number): Promise<boolean> {
   return ensureWorkerStartedShared(port, __filename);
 }
 
+export function runObserverSessionReaper(
+  store: SessionStore,
+  apply: boolean,
+  print: (line: string) => void = console.log
+): ObserverJunkReapCounts {
+  const sessions = store.findObserverJunkSessions();
+  const ids = sessions.map(session => session.sessionDbId);
+  const counts = apply
+    ? store.reapObserverJunkSessions(ids)
+    : store.countObserverJunkSessionRows(ids);
+
+  print(`Observer session reap (${apply ? 'applied' : 'dry-run'})`);
+  print(`  Pending messages:  ${counts.pendingMessages}`);
+  print(`  User prompts:      ${counts.userPrompts}`);
+  print(`  Observations:      ${counts.observations}`);
+  print(`  Session summaries: ${counts.sessionSummaries}`);
+  print(`  SDK sessions:      ${counts.sdkSessions}`);
+  print('  Most recent junk sessions:');
+  for (const session of sessions.slice(0, 5)) {
+    const promptPreview = (session.userPrompt ?? '').slice(0, 60);
+    print(`    ${session.sessionDbId} | ${session.contentSessionId} | ${session.project} | ${session.startedAt} | ${promptPreview}`);
+  }
+  if (sessions.length === 0) {
+    print('    (none)');
+  }
+  print('  Chroma documents are not deleted; orphans remain until Chroma is rebuilt.');
+  print('  Do not run this command concurrently with a live worker flush.');
+
+  return counts;
+}
+
 // ============================================================================
 // CLI Entry Point
 // ============================================================================
@@ -1412,6 +1444,16 @@ async function main() {
       }
       for (const err of result.errors) {
         console.log(`  ! ${err.worktree}: ${err.error}`);
+      }
+      process.exit(0);
+    }
+
+    case 'reap-observer-sessions': {
+      const store = new SessionStore();
+      try {
+        runObserverSessionReaper(store, process.argv.includes('--apply'));
+      } finally {
+        store.close();
       }
       process.exit(0);
     }

@@ -139,6 +139,11 @@ export function runAdoptCommand(extraArgs: string[] = []): void {
   });
 }
 
+/** Remove sessions created by the historical observer feedback loop. */
+export function runReapObserverSessionsCommand(extraArgs: string[] = []): void {
+  spawnBunWorkerCommand('reap-observer-sessions', extraArgs);
+}
+
 /**
  * Search the worker API at `GET /api/search?query=<query>`.
  */
