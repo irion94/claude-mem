@@ -62,6 +62,7 @@ export function storeObservation(
   // Use override timestamp if provided (for processing backlog messages with original timestamps)
   const timestampEpoch = overrideTimestampEpoch ?? Date.now();
   const timestampIso = new Date(timestampEpoch).toISOString();
+  const ingestedAtEpoch = Date.now();
 
   // Guard against empty project string (race condition where project isn't set yet)
   const resolvedProject = project || getProjectContext(process.cwd()).primary;
@@ -77,8 +78,8 @@ export function storeObservation(
   const stmt = db.prepare(`
     INSERT INTO observations
     (memory_session_id, project, type, title, subtitle, facts, narrative, concepts,
-     files_read, files_modified, prompt_number, discovery_tokens, agent_type, agent_id, content_hash, created_at, created_at_epoch)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     files_read, files_modified, prompt_number, discovery_tokens, agent_type, agent_id, content_hash, created_at, created_at_epoch, ingested_at_epoch)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const result = stmt.run(
@@ -98,7 +99,8 @@ export function storeObservation(
     observation.agent_id ?? null,
     contentHash,
     timestampIso,
-    timestampEpoch
+    timestampEpoch,
+    ingestedAtEpoch
   );
 
   return {

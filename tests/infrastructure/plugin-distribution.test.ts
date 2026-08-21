@@ -116,6 +116,28 @@ describe('Plugin Distribution - hooks.json Integrity', () => {
       }
     }
   });
+
+  it('should prefer the irion94 cache before warning and falling back to thedotmack (BAT-129)', () => {
+    const hooksPath = path.join(projectRoot, 'plugin/hooks/hooks.json');
+    const parsed = JSON.parse(readFileSync(hooksPath, 'utf-8'));
+    const forkCachePath = '$HOME/.claude/plugins/cache/irion94/claude-mem';
+    const upstreamCachePath = '$HOME/.claude/plugins/cache/thedotmack/claude-mem';
+    const warning = 'claude-mem: irion94 cache unavailable; falling back to thedotmack cache';
+
+    for (const matchers of Object.values(parsed.hooks)) {
+      for (const matcher of matchers as any[]) {
+        for (const hook of matcher.hooks) {
+          if (hook.type === 'command') {
+            expect(hook.command).toContain(forkCachePath);
+            expect(hook.command).toContain(upstreamCachePath);
+            expect(hook.command).toContain(`${warning}\" >&2`);
+            expect(hook.command.indexOf(forkCachePath)).toBeLessThan(hook.command.indexOf(warning));
+            expect(hook.command.indexOf(warning)).toBeLessThan(hook.command.indexOf(upstreamCachePath));
+          }
+        }
+      }
+    }
+  });
 });
 
 describe('Plugin Distribution - package.json Files Field', () => {

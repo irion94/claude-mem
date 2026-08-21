@@ -114,6 +114,7 @@ describe('MigrationRunner', () => {
       expect(columnNames).toContain('prompt_number');
       expect(columnNames).toContain('discovery_tokens');
       expect(columnNames).toContain('content_hash');
+      expect(columnNames).toContain('ingested_at_epoch');
     });
 
     it('should record all migration versions', () => {
@@ -136,6 +137,7 @@ describe('MigrationRunner', () => {
       expect(versions).toContain(20);  // failed_at_epoch
       expect(versions).toContain(21);  // ON UPDATE CASCADE
       expect(versions).toContain(22);  // content_hash
+      expect(versions).toContain(28);  // observation ingest timestamp
     });
   });
 
@@ -201,6 +203,19 @@ describe('MigrationRunner', () => {
 
       const indexNames = getIndexNames(db, 'sdk_sessions');
       expect(indexNames).toContain('idx_sdk_sessions_platform_source');
+    });
+  });
+
+  describe('schema drift recovery for migration 28', () => {
+    it('restores ingested_at_epoch even when version 28 is already recorded', () => {
+      const runner = new MigrationRunner(db);
+      runner.runAllMigrations();
+      db.run('ALTER TABLE observations DROP COLUMN ingested_at_epoch');
+
+      runner.runAllMigrations();
+
+      const columnNames = getColumns(db, 'observations').map(column => column.name);
+      expect(columnNames).toContain('ingested_at_epoch');
     });
   });
 

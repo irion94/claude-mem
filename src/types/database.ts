@@ -69,6 +69,7 @@ export interface ObservationRecord {
   type: 'decision' | 'bugfix' | 'feature' | 'refactor' | 'discovery' | 'change';
   created_at: string;
   created_at_epoch: number;
+  ingested_at_epoch?: number | null;
   title?: string;
   concept?: string;
   source_files?: string;

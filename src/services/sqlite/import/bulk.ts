@@ -166,8 +166,8 @@ export function importObservation(
       memory_session_id, project, text, type, title, subtitle,
       facts, narrative, concepts, files_read, files_modified,
       prompt_number, discovery_tokens, agent_type, agent_id,
-      created_at, created_at_epoch
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      created_at, created_at_epoch, ingested_at_epoch
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const result = stmt.run(
@@ -187,7 +187,8 @@ export function importObservation(
     obs.agent_type ?? null,
     obs.agent_id ?? null,
     obs.created_at,
-    obs.created_at_epoch
+    obs.created_at_epoch,
+    Date.now()
   );
 
   return { imported: true, id: result.lastInsertRowid as number };

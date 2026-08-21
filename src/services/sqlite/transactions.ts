@@ -59,6 +59,7 @@ export function storeObservationsAndMarkComplete(
   // Use override timestamp if provided
   const timestampEpoch = overrideTimestampEpoch ?? Date.now();
   const timestampIso = new Date(timestampEpoch).toISOString();
+  const ingestedAtEpoch = Date.now();
 
   // Create transaction that wraps all operations
   const storeAndMarkTx = db.transaction(() => {
@@ -68,8 +69,8 @@ export function storeObservationsAndMarkComplete(
     const obsStmt = db.prepare(`
       INSERT INTO observations
       (memory_session_id, project, type, title, subtitle, facts, narrative, concepts,
-       files_read, files_modified, prompt_number, discovery_tokens, agent_type, agent_id, content_hash, created_at, created_at_epoch)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       files_read, files_modified, prompt_number, discovery_tokens, agent_type, agent_id, content_hash, created_at, created_at_epoch, ingested_at_epoch)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     for (const observation of observations) {
@@ -97,7 +98,8 @@ export function storeObservationsAndMarkComplete(
         observation.agent_id ?? null,
         contentHash,
         timestampIso,
-        timestampEpoch
+        timestampEpoch,
+        ingestedAtEpoch
       );
       observationIds.push(Number(result.lastInsertRowid));
     }
@@ -180,6 +182,7 @@ export function storeObservations(
   // Use override timestamp if provided
   const timestampEpoch = overrideTimestampEpoch ?? Date.now();
   const timestampIso = new Date(timestampEpoch).toISOString();
+  const ingestedAtEpoch = Date.now();
 
   // Create transaction that wraps all operations
   const storeTx = db.transaction(() => {
@@ -189,8 +192,8 @@ export function storeObservations(
     const obsStmt = db.prepare(`
       INSERT INTO observations
       (memory_session_id, project, type, title, subtitle, facts, narrative, concepts,
-       files_read, files_modified, prompt_number, discovery_tokens, agent_type, agent_id, content_hash, created_at, created_at_epoch)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       files_read, files_modified, prompt_number, discovery_tokens, agent_type, agent_id, content_hash, created_at, created_at_epoch, ingested_at_epoch)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     for (const observation of observations) {
@@ -218,7 +221,8 @@ export function storeObservations(
         observation.agent_id ?? null,
         contentHash,
         timestampIso,
-        timestampEpoch
+        timestampEpoch,
+        ingestedAtEpoch
       );
       observationIds.push(Number(result.lastInsertRowid));
     }

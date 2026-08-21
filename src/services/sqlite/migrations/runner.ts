@@ -39,6 +39,7 @@ export class MigrationRunner {
     this.addSessionPlatformSourceColumn();
     this.ensureMergedIntoProjectColumns();
     this.addObservationSubagentColumns();
+    this.addObservationIngestedAtEpochColumn();
   }
 
   /**
@@ -89,6 +90,7 @@ export class MigrationRunner {
         type TEXT NOT NULL,
         created_at TEXT NOT NULL,
         created_at_epoch INTEGER NOT NULL,
+        ingested_at_epoch INTEGER,
         FOREIGN KEY(memory_session_id) REFERENCES sdk_sessions(memory_session_id) ON DELETE CASCADE ON UPDATE CASCADE
       );
 
@@ -1014,5 +1016,16 @@ export class MigrationRunner {
     if (!applied) {
       this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(27, new Date().toISOString());
     }
+  }
+
+  /** Add the wall-clock ingest time without changing historical event timestamps (migration 28). */
+  private addObservationIngestedAtEpochColumn(): void {
+    const columns = this.db.query('PRAGMA table_info(observations)').all() as TableColumnInfo[];
+    if (!columns.some(col => col.name === 'ingested_at_epoch')) {
+      this.db.run('ALTER TABLE observations ADD COLUMN ingested_at_epoch INTEGER');
+      logger.debug('DB', 'Added ingested_at_epoch column to observations table');
+    }
+
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(28, new Date().toISOString());
   }
 }
