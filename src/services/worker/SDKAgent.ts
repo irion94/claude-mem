@@ -403,7 +403,9 @@ export class SDKAgent {
           tool_name: message.tool_name!,
           tool_input: JSON.stringify(message.tool_input),
           tool_output: JSON.stringify(message.tool_response),
-          created_at_epoch: message._originalTimestamp,
+          // BAT-127 batch: per-message source timestamp; BAT-130 fallback for
+          // rows recovered without one (earliest pending of the batch).
+          created_at_epoch: message._originalTimestamp ?? session.earliestPendingTimestamp ?? Date.now(),
           cwd: message.cwd
         }))));
       }

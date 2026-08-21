@@ -263,6 +263,7 @@ export const migration004: Migration = {
         type TEXT NOT NULL,
         created_at TEXT NOT NULL,
         created_at_epoch INTEGER NOT NULL,
+        ingested_at_epoch INTEGER,
         FOREIGN KEY(memory_session_id) REFERENCES sdk_sessions(memory_session_id) ON DELETE CASCADE
       );
 

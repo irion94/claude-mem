@@ -85,6 +85,7 @@ export class SessionStore {
     this.addObservationModelColumns();
     this.ensureMergedIntoProjectColumns();
     this.addObservationSubagentColumns();
+    this.addObservationIngestedAtEpochColumn();
   }
 
   /**
@@ -135,6 +136,7 @@ export class SessionStore {
         type TEXT NOT NULL,
         created_at TEXT NOT NULL,
         created_at_epoch INTEGER NOT NULL,
+        ingested_at_epoch INTEGER,
         FOREIGN KEY(memory_session_id) REFERENCES sdk_sessions(memory_session_id) ON DELETE CASCADE ON UPDATE CASCADE
       );
 
@@ -1050,6 +1052,17 @@ export class SessionStore {
     }
   }
 
+  /** Add the wall-clock ingest time without changing historical event timestamps (migration 28). */
+  private addObservationIngestedAtEpochColumn(): void {
+    const columns = this.db.query('PRAGMA table_info(observations)').all() as TableColumnInfo[];
+    if (!columns.some(col => col.name === 'ingested_at_epoch')) {
+      this.db.run('ALTER TABLE observations ADD COLUMN ingested_at_epoch INTEGER');
+      logger.debug('DB', 'Added ingested_at_epoch column to observations table');
+    }
+
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(28, new Date().toISOString());
+  }
+
   /**
    * Update the memory session ID for a session
    * Called by SDKAgent when it captures the session ID from the first SDK message
@@ -1823,6 +1836,7 @@ export class SessionStore {
     const timestampIso = new Date(timestampEpoch).toISOString();
 
     // Content-hash deduplication
+    const ingestedAtEpoch = Date.now();
     const contentHash = computeObservationContentHash(memorySessionId, observation.title, observation.narrative);
     const existing = findDuplicateObservation(this.db, contentHash, timestampEpoch);
     if (existing) {
@@ -1832,9 +1846,9 @@ export class SessionStore {
     const stmt = this.db.prepare(`
       INSERT INTO observations
       (memory_session_id, project, type, title, subtitle, facts, narrative, concepts,
-       files_read, files_modified, prompt_number, discovery_tokens, agent_type, agent_id, content_hash, created_at, created_at_epoch,
+       files_read, files_modified, prompt_number, discovery_tokens, agent_type, agent_id, content_hash, created_at, created_at_epoch, ingested_at_epoch,
        generated_by_model)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const result = stmt.run(
@@ -1855,6 +1869,7 @@ export class SessionStore {
       contentHash,
       timestampIso,
       timestampEpoch,
+      ingestedAtEpoch,
       generatedByModel || null
     );
 
@@ -1962,6 +1977,7 @@ export class SessionStore {
     // Use override timestamp if provided
     const timestampEpoch = overrideTimestampEpoch ?? Date.now();
     const timestampIso = new Date(timestampEpoch).toISOString();
+    const ingestedAtEpoch = Date.now();
 
     // Create transaction that wraps all operations
     const storeTx = this.db.transaction(() => {
@@ -1971,9 +1987,9 @@ export class SessionStore {
       const obsStmt = this.db.prepare(`
         INSERT INTO observations
         (memory_session_id, project, type, title, subtitle, facts, narrative, concepts,
-         files_read, files_modified, prompt_number, discovery_tokens, agent_type, agent_id, content_hash, created_at, created_at_epoch,
+         files_read, files_modified, prompt_number, discovery_tokens, agent_type, agent_id, content_hash, created_at, created_at_epoch, ingested_at_epoch,
          generated_by_model)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       for (const observation of observations) {
@@ -2003,6 +2019,7 @@ export class SessionStore {
           contentHash,
           timestampIso,
           timestampEpoch,
+          ingestedAtEpoch,
           generatedByModel || null
         );
         observationIds.push(Number(result.lastInsertRowid));
@@ -2098,6 +2115,7 @@ export class SessionStore {
     // Use override timestamp if provided
     const timestampEpoch = overrideTimestampEpoch ?? Date.now();
     const timestampIso = new Date(timestampEpoch).toISOString();
+    const ingestedAtEpoch = Date.now();
 
     // Create transaction that wraps all operations
     const storeAndMarkTx = this.db.transaction(() => {
@@ -2107,9 +2125,9 @@ export class SessionStore {
       const obsStmt = this.db.prepare(`
         INSERT INTO observations
         (memory_session_id, project, type, title, subtitle, facts, narrative, concepts,
-         files_read, files_modified, prompt_number, discovery_tokens, agent_type, agent_id, content_hash, created_at, created_at_epoch,
+         files_read, files_modified, prompt_number, discovery_tokens, agent_type, agent_id, content_hash, created_at, created_at_epoch, ingested_at_epoch,
          generated_by_model)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       for (const observation of observations) {
@@ -2139,6 +2157,7 @@ export class SessionStore {
           contentHash,
           timestampIso,
           timestampEpoch,
+          ingestedAtEpoch,
           generatedByModel || null
         );
         observationIds.push(Number(result.lastInsertRowid));
@@ -2821,8 +2840,8 @@ export class SessionStore {
         memory_session_id, project, text, type, title, subtitle,
         facts, narrative, concepts, files_read, files_modified,
         prompt_number, discovery_tokens, agent_type, agent_id,
-        created_at, created_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        created_at, created_at_epoch, ingested_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const result = stmt.run(
@@ -2842,7 +2861,8 @@ export class SessionStore {
       obs.agent_type ?? null,
       obs.agent_id ?? null,
       obs.created_at,
-      obs.created_at_epoch
+      obs.created_at_epoch,
+      Date.now()
     );
 
     return { imported: true, id: result.lastInsertRowid as number };
