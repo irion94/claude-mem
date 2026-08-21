@@ -144,6 +144,53 @@ export class PendingMessageStore {
     return claimTx(sessionDbId) as PersistentPendingMessage | null;
   }
 
+  /** Atomically claim every currently pending message for one model turn. */
+  claimPendingBatch(sessionDbId: number, limit?: number): PersistentPendingMessage[] {
+    const claimTx = this.db.transaction((sessionId: number, batchLimit?: number) => {
+      const now = Date.now();
+      this.db.prepare(`
+        UPDATE pending_messages
+        SET status = 'pending', started_processing_at_epoch = NULL
+        WHERE session_db_id = ? AND status = 'processing'
+          AND started_processing_at_epoch < ?
+      `).run(sessionId, now - STALE_PROCESSING_THRESHOLD_MS);
+      const messages = this.db.prepare(`
+        SELECT * FROM pending_messages
+        WHERE session_db_id = ? AND status = 'pending'
+        ORDER BY id ASC
+        ${batchLimit ? 'LIMIT ?' : ''}
+      `).all(...(batchLimit ? [sessionId, batchLimit] : [sessionId])) as PersistentPendingMessage[];
+
+      if (messages.length > 0) {
+        const placeholders = messages.map(() => '?').join(',');
+        this.db.prepare(`
+          UPDATE pending_messages
+          SET status = 'processing', started_processing_at_epoch = ?
+          WHERE id IN (${placeholders})
+        `).run(now, ...messages.map(message => message.id));
+      }
+      return messages;
+    });
+
+    return claimTx(sessionDbId, limit) as PersistentPendingMessage[];
+  }
+
+  getPendingBatchInfo(sessionDbId: number): { count: number; observationCount: number; oldestTimestamp: number | null } {
+    const result = this.db.prepare(`
+      SELECT
+        COUNT(*) AS count,
+        SUM(CASE WHEN message_type = 'observation' THEN 1 ELSE 0 END) AS observation_count,
+        MIN(created_at_epoch) AS oldest_timestamp
+      FROM pending_messages
+      WHERE session_db_id = ? AND status = 'pending'
+    `).get(sessionDbId) as { count: number; observation_count: number | null; oldest_timestamp: number | null };
+    return {
+      count: result.count,
+      observationCount: result.observation_count ?? 0,
+      oldestTimestamp: result.oldest_timestamp,
+    };
+  }
+
   /**
    * Confirm a message was successfully processed - DELETE it from the queue.
    * CRITICAL: Only call this AFTER the observation/summary has been stored to DB.

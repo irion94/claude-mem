@@ -57,6 +57,9 @@ export interface SettingsDefaults {
   // Process Management
   CLAUDE_MEM_MAX_CONCURRENT_AGENTS: string;  // Max concurrent Claude SDK agent subprocesses (default: 2)
   CLAUDE_MEM_SESSION_MAX_AGE_HOURS: string;  // Wall-clock session age limit in hours; 0 or negative disables the guard (default: 4, #1590)
+  CLAUDE_MEM_BATCH_MAX_MESSAGES: string;
+  CLAUDE_MEM_BATCH_MAX_AGE_SEC: string;
+  CLAUDE_MEM_SUMMARY_MODE: string;
   // Exclusion Settings
   CLAUDE_MEM_EXCLUDED_PROJECTS: string;  // Comma-separated glob patterns for excluded project paths
   CLAUDE_MEM_FOLDER_MD_EXCLUDE: string;  // JSON array of folder paths to exclude from CLAUDE.md generation
@@ -135,6 +138,9 @@ export class SettingsDefaultsManager {
     // Process Management
     CLAUDE_MEM_MAX_CONCURRENT_AGENTS: '2',  // Max concurrent Claude SDK agent subprocesses
     CLAUDE_MEM_SESSION_MAX_AGE_HOURS: '4',  // Wall-clock session age limit in hours; 0 or negative disables the guard
+    CLAUDE_MEM_BATCH_MAX_MESSAGES: '5',
+    CLAUDE_MEM_BATCH_MAX_AGE_SEC: '300',
+    CLAUDE_MEM_SUMMARY_MODE: 'batched',
     // Exclusion Settings
     CLAUDE_MEM_EXCLUDED_PROJECTS: '',  // Comma-separated glob patterns for excluded project paths
     CLAUDE_MEM_FOLDER_MD_EXCLUDE: '[]',  // JSON array of folder paths to exclude from CLAUDE.md generation

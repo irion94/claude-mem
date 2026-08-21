@@ -66,6 +66,9 @@ export class SessionRoutes extends BaseRouteHandler {
     // completion path and the HTTP fallback route operate on the same instance
     // (avoids duplicate construction; keeps finalize semantics consistent).
     this.completionHandler = completionHandler;
+    this.sessionManager.setOnFlushRequested(sessionDbId => {
+      this.ensureGeneratorRunning(sessionDbId, 'batch-flush');
+    });
   }
 
   /**

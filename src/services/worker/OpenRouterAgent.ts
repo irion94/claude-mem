@@ -129,8 +129,52 @@ export class OpenRouterAgent {
 
     // Process pending messages
     try {
-      for await (const message of this.sessionManager.getMessageIterator(session.sessionDbId)) {
-        lastCwd = await this.processOneMessage(session, message, lastCwd, apiKey, model, siteUrl, appName, worker, mode);
+      for await (const batch of this.sessionManager.getMessageIterator(session.sessionDbId)) {
+        const messages = batch.messages;
+        session.processingMessageIds.push(...messages.map(message => message._persistentId));
+        const lastMessage = messages.at(-1)!;
+        session.pendingAgentId = lastMessage.agentId ?? null;
+        session.pendingAgentType = lastMessage.agentType ?? null;
+        const lastWithCwd = messages.findLast(message => message.cwd);
+        if (lastWithCwd?.cwd) lastCwd = lastWithCwd.cwd;
+
+        const observations = messages.filter(message => message.type === 'observation');
+        const latestObservation = observations.at(-1);
+        if (latestObservation?.prompt_number !== undefined) session.lastPromptNumber = latestObservation.prompt_number;
+        const promptParts: string[] = [];
+        if (observations.length > 0) {
+          promptParts.push(buildObservationPrompt(observations.map(message => ({
+            id: 0,
+            tool_name: message.tool_name!,
+            tool_input: JSON.stringify(message.tool_input),
+            tool_output: JSON.stringify(message.tool_response),
+            created_at_epoch: message._originalTimestamp,
+            cwd: message.cwd,
+          }))));
+        }
+        const latestSummary = messages.filter(message => message.type === 'summarize').at(-1);
+        if (latestSummary) {
+          promptParts.push(buildSummaryPrompt({
+            id: session.sessionDbId,
+            memory_session_id: session.memorySessionId,
+            project: session.project,
+            user_prompt: session.userPrompt,
+            last_assistant_message: latestSummary.last_assistant_message || '',
+          }, mode));
+        }
+
+        const originalTimestamp = session.earliestPendingTimestamp;
+        const prompt = promptParts.join('\n\n');
+        session.conversationHistory.push({ role: 'user', content: prompt });
+        const response = await this.queryOpenRouterMultiTurn(session.conversationHistory, apiKey, model, siteUrl, appName);
+        const tokensUsed = response.tokensUsed || 0;
+        if (response.content) session.conversationHistory.push({ role: 'assistant', content: response.content });
+        session.cumulativeInputTokens += Math.floor(tokensUsed * 0.7);
+        session.cumulativeOutputTokens += Math.floor(tokensUsed * 0.3);
+        await processAgentResponse(
+          response.content || '', session, this.dbManager, this.sessionManager,
+          worker, tokensUsed, originalTimestamp, 'OpenRouter', lastCwd, model
+        );
       }
     } catch (error: unknown) {
       if (error instanceof Error) {

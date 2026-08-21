@@ -217,31 +217,57 @@ export class GeminiAgent {
     // Track cwd from messages for CLAUDE.md generation
     let lastCwd: string | undefined;
 
-    for await (const message of this.sessionManager.getMessageIterator(session.sessionDbId)) {
-      // CLAIM-CONFIRM: Track message ID for confirmProcessed() after successful storage
-      // The message is now in 'processing' status in DB until ResponseProcessor calls confirmProcessed()
-      session.processingMessageIds.push(message._persistentId);
+    for await (const batch of this.sessionManager.getMessageIterator(session.sessionDbId)) {
+      const messages = batch.messages;
+      session.processingMessageIds.push(...messages.map(message => message._persistentId));
+      const lastMessage = messages.at(-1)!;
+      session.pendingAgentId = lastMessage.agentId ?? null;
+      session.pendingAgentType = lastMessage.agentType ?? null;
 
-      // Capture subagent identity from the claimed message so ResponseProcessor
-      // can label observation rows with the originating Claude Code subagent.
-      // Always overwrite (even with null) so a main-session message after a subagent
-      // message clears the stale identity; otherwise mixed batches could mislabel.
-      session.pendingAgentId = message.agentId ?? null;
-      session.pendingAgentType = message.agentType ?? null;
-
-      // Capture cwd from each message for worktree support
-      if (message.cwd) {
-        lastCwd = message.cwd;
-      }
-      // Capture earliest timestamp BEFORE processing (will be cleared after)
-      // This ensures backlog messages get their original timestamps, not current time
+      const lastWithCwd = messages.findLast(message => message.cwd);
+      if (lastWithCwd?.cwd) lastCwd = lastWithCwd.cwd;
       const originalTimestamp = session.earliestPendingTimestamp;
+      const observations = messages.filter(message => message.type === 'observation');
+      const latestObservation = observations.at(-1);
+      if (latestObservation?.prompt_number !== undefined) session.lastPromptNumber = latestObservation.prompt_number;
 
-      if (message.type === 'observation') {
-        await this.processObservationMessage(session, message, worker, apiKey, model, rateLimitingEnabled, originalTimestamp, lastCwd);
-      } else if (message.type === 'summarize') {
-        await this.processSummaryMessage(session, message, worker, apiKey, model, rateLimitingEnabled, mode, originalTimestamp, lastCwd);
+      const promptParts: string[] = [];
+      if (observations.length > 0) {
+        promptParts.push(buildObservationPrompt(observations.map(message => ({
+          id: 0,
+          tool_name: message.tool_name!,
+          tool_input: JSON.stringify(message.tool_input),
+          tool_output: JSON.stringify(message.tool_response),
+          created_at_epoch: message._originalTimestamp,
+          cwd: message.cwd,
+        }))));
       }
+      const latestSummary = messages.filter(message => message.type === 'summarize').at(-1);
+      if (latestSummary) {
+        promptParts.push(buildSummaryPrompt({
+          id: session.sessionDbId,
+          memory_session_id: session.memorySessionId,
+          project: session.project,
+          user_prompt: session.userPrompt,
+          last_assistant_message: latestSummary.last_assistant_message || '',
+        }, mode));
+      }
+
+      if (!session.memorySessionId) {
+        throw new Error('Cannot process batch: memorySessionId not yet captured. This session may need to be reinitialized.');
+      }
+      const prompt = promptParts.join('\n\n');
+      session.conversationHistory.push({ role: 'user', content: prompt });
+      const response = await this.queryGeminiMultiTurn(session.conversationHistory, apiKey, model, rateLimitingEnabled);
+      if (!response.content) {
+        logger.warn('SDK', 'Empty Gemini batch response, preserving messages for recovery', { sessionId: session.sessionDbId });
+        continue;
+      }
+      const tokensUsed = response.tokensUsed || 0;
+      session.conversationHistory.push({ role: 'assistant', content: response.content });
+      session.cumulativeInputTokens += Math.floor(tokensUsed * 0.7);
+      session.cumulativeOutputTokens += Math.floor(tokensUsed * 0.3);
+      await processAgentResponse(response.content, session, this.dbManager, this.sessionManager, worker, tokensUsed, originalTimestamp, 'Gemini', lastCwd, model);
     }
   }
 

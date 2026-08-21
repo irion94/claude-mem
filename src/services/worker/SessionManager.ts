@@ -11,13 +11,25 @@
 import { EventEmitter } from 'events';
 import { DatabaseManager } from './DatabaseManager.js';
 import { logger } from '../../utils/logger.js';
-import type { ActiveSession, PendingMessage, PendingMessageWithId, ObservationData } from '../worker-types.js';
+import type { ActiveSession, PendingMessage, PendingMessageBatch, ObservationData } from '../worker-types.js';
 import { PendingMessageStore } from '../sqlite/PendingMessageStore.js';
 import { SessionQueueProcessor } from '../queue/SessionQueueProcessor.js';
 import { getProcessBySession, ensureProcessExit } from './ProcessRegistry.js';
 import { getSupervisor } from '../../supervisor/index.js';
 import { MAX_CONSECUTIVE_SUMMARY_FAILURES } from '../../sdk/prompts.js';
 import { RestartGuard } from './RestartGuard.js';
+import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
+import { USER_SETTINGS_PATH } from '../../shared/paths.js';
+
+type BatchSettings = Pick<ReturnType<typeof SettingsDefaultsManager.loadFromFile>,
+  'CLAUDE_MEM_BATCH_MAX_MESSAGES' | 'CLAUDE_MEM_BATCH_MAX_AGE_SEC' | 'CLAUDE_MEM_SUMMARY_MODE'>;
+
+interface SessionManagerOptions {
+  getSettings?: () => Partial<BatchSettings>;
+  now?: () => number;
+  setTimer?: typeof setTimeout;
+  clearTimer?: typeof clearTimeout;
+}
 
 /** Idle threshold before a stuck generator (zombie subprocess) is force-killed. */
 export const MAX_GENERATOR_IDLE_MS = 5 * 60 * 1000; // 5 minutes
@@ -89,9 +101,20 @@ export class SessionManager {
   private sessionQueues: Map<number, EventEmitter> = new Map();
   private onSessionDeletedCallback?: () => void;
   private pendingStore: PendingMessageStore | null = null;
+  private flushReasons = new Map<number, import('../worker-types.js').FlushReason>();
+  private flushTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  private onFlushRequestedCallback?: (sessionDbId: number) => void;
+  private getSettings: () => Partial<BatchSettings>;
+  private now: () => number;
+  private setTimer: typeof setTimeout;
+  private clearTimer: typeof clearTimeout;
 
-  constructor(dbManager: DatabaseManager) {
+  constructor(dbManager: DatabaseManager, options: SessionManagerOptions = {}) {
     this.dbManager = dbManager;
+    this.getSettings = options.getSettings ?? (() => SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH));
+    this.now = options.now ?? Date.now;
+    this.setTimer = options.setTimer ?? setTimeout;
+    this.clearTimer = options.clearTimer ?? clearTimeout;
   }
 
   /**
@@ -110,6 +133,98 @@ export class SessionManager {
    */
   setOnSessionDeleted(callback: () => void): void {
     this.onSessionDeletedCallback = callback;
+  }
+
+  setOnFlushRequested(callback: (sessionDbId: number) => void): void {
+    this.onFlushRequestedCallback = callback;
+  }
+
+  private getBatchConfig(): { maxMessages: number; maxAgeMs: number; summaryMode: 'batched' | 'immediate' } {
+    const settings = this.getSettings();
+    const parsedMaxMessages = parseInt(settings.CLAUDE_MEM_BATCH_MAX_MESSAGES ?? '5', 10);
+    const parsedMaxAgeSec = parseFloat(settings.CLAUDE_MEM_BATCH_MAX_AGE_SEC ?? '300');
+    const maxMessages = Number.isFinite(parsedMaxMessages) ? Math.max(1, parsedMaxMessages) : 5;
+    const maxAgeSec = Number.isFinite(parsedMaxAgeSec) ? Math.max(0, parsedMaxAgeSec) : 300;
+    return {
+      maxMessages,
+      maxAgeMs: maxAgeSec * 1000,
+      summaryMode: settings.CLAUDE_MEM_SUMMARY_MODE === 'immediate' ? 'immediate' : 'batched',
+    };
+  }
+
+  private clearFlushTimer(sessionDbId: number): void {
+    const timer = this.flushTimers.get(sessionDbId);
+    if (timer) this.clearTimer(timer);
+    this.flushTimers.delete(sessionDbId);
+  }
+
+  private armAgeTimer(sessionDbId: number): void {
+    if (this.flushReasons.has(sessionDbId) || this.flushTimers.has(sessionDbId)) return;
+    const info = this.getPendingStore().getPendingBatchInfo(sessionDbId);
+    if (info.count === 0 || info.oldestTimestamp === null) return;
+    const delay = Math.max(0, info.oldestTimestamp + this.getBatchConfig().maxAgeMs - this.now());
+    const timer = this.setTimer(() => {
+      this.flushTimers.delete(sessionDbId);
+      this.flushSession(sessionDbId, 'age');
+    }, delay);
+    this.flushTimers.set(sessionDbId, timer);
+  }
+
+  flushSession(sessionDbId: number, reason: import('../worker-types.js').FlushReason, notify = true): void {
+    if (this.getPendingStore().getPendingBatchInfo(sessionDbId).count === 0) return;
+    this.clearFlushTimer(sessionDbId);
+    if (this.flushReasons.has(sessionDbId)) return;
+    this.flushReasons.set(sessionDbId, reason);
+    this.sessionQueues.get(sessionDbId)?.emit('message');
+    if (notify) this.onFlushRequestedCallback?.(sessionDbId);
+  }
+
+  consumeFlushReason(sessionDbId: number): import('../worker-types.js').FlushReason | null {
+    const reason = this.flushReasons.get(sessionDbId) ?? null;
+    this.flushReasons.delete(sessionDbId);
+    return reason;
+  }
+
+  isFlushReady(sessionDbId: number): boolean {
+    return this.flushReasons.has(sessionDbId);
+  }
+
+  private getClaimLimit(): number | undefined {
+    const config = this.getBatchConfig();
+    return config.maxMessages === 1 || config.summaryMode === 'immediate' ? 1 : undefined;
+  }
+
+  notifyQueueProcessed(sessionDbId: number): void {
+    const pendingCount = this.getPendingStore().getPendingCount(sessionDbId);
+    if (pendingCount === 0) {
+      this.sessionQueues.get(sessionDbId)?.emit('drained');
+    } else if (this.getClaimLimit() === 1) {
+      this.flushSession(sessionDbId, 'count');
+    }
+  }
+
+  async flushAndWait(sessionDbId: number, reason: import('../worker-types.js').FlushReason): Promise<void> {
+    if (this.getPendingStore().getPendingCount(sessionDbId) === 0) return;
+    const emitter = this.sessionQueues.get(sessionDbId);
+    if (!emitter) throw new Error(`Cannot flush inactive session ${sessionDbId}`);
+    this.flushSession(sessionDbId, reason);
+    if (this.getPendingStore().getPendingCount(sessionDbId) === 0) return;
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = this.setTimer(() => {
+        cleanup();
+        reject(new Error(`Timed out flushing session ${sessionDbId}`));
+      }, 30_000);
+      const onDrained = () => {
+        cleanup();
+        resolve();
+      };
+      const cleanup = () => {
+        this.clearTimer(timeout);
+        emitter.off('drained', onDrained);
+      };
+      emitter.once('drained', onDrained);
+    });
   }
 
   /**
@@ -231,7 +346,8 @@ export class SessionManager {
       lastGeneratorActivity: Date.now(),  // Initialize for stale detection (Issue #1099)
       consecutiveSummaryFailures: 0,  // Circuit breaker for summary retry loop (#1633)
       pendingAgentId: null,   // Subagent identity carried from the most recent claimed message
-      pendingAgentType: null  // (null for main-session messages)
+      pendingAgentType: null,  // (null for main-session messages)
+      summaryRequested: false
     };
 
     logger.debug('SESSION', 'Creating new session object (memorySessionId cleared to prevent stale resume)', {
@@ -247,6 +363,23 @@ export class SessionManager {
     // Create event emitter for queue notifications
     const emitter = new EventEmitter();
     this.sessionQueues.set(sessionDbId, emitter);
+
+    // A newly initialized session is the opportunity to revive pending work
+    // belonging to sessions whose generator is no longer alive.
+    for (const [orphanId, orphan] of this.sessions) {
+      if (orphanId !== sessionDbId && !orphan.generatorPromise) {
+        this.flushSession(orphanId, 'new');
+      }
+    }
+
+    // Re-arm an age deadline from the oldest durable row after reactivation.
+    try {
+      this.armAgeTimer(sessionDbId);
+    } catch (error) {
+      logger.debug('QUEUE', 'Unable to re-arm batch timer during session initialization', {
+        sessionId: sessionDbId
+      }, error instanceof Error ? error : new Error(String(error)));
+    }
 
     logger.info('SESSION', 'Session initialized', {
       sessionId: sessionDbId,
@@ -291,11 +424,10 @@ export class SessionManager {
       agentId: data.agentId,
       agentType: data.agentType
     };
-
     try {
       const messageId = this.getPendingStore().enqueue(sessionDbId, session.contentSessionId, message);
       const queueDepth = this.getPendingStore().getPendingCount(sessionDbId);
-      const toolSummary = logger.formatTool(data.tool_name, data.tool_input);
+      const toolSummary = logger.formatTool?.(data.tool_name, data.tool_input) ?? data.tool_name;
       logger.info('QUEUE', `ENQUEUED | sessionDbId=${sessionDbId} | messageId=${messageId} | type=observation | tool=${toolSummary} | depth=${queueDepth}`, {
         sessionId: sessionDbId
       });
@@ -314,9 +446,13 @@ export class SessionManager {
       throw error; // Don't continue if we can't persist
     }
 
-    // Notify generator immediately (zero latency)
-    const emitter = this.sessionQueues.get(sessionDbId);
-    emitter?.emit('message');
+    const config = this.getBatchConfig();
+    const info = this.getPendingStore().getPendingBatchInfo(sessionDbId);
+    if (info.observationCount >= config.maxMessages) {
+      this.flushSession(sessionDbId, 'count');
+    } else {
+      this.armAgeTimer(sessionDbId);
+    }
   }
 
   /**
@@ -350,6 +486,8 @@ export class SessionManager {
       type: 'summarize',
       last_assistant_message: lastAssistantMessage
     };
+    session.summaryRequested = true;
+    session.lastAssistantMessage = lastAssistantMessage;
 
     try {
       const messageId = this.getPendingStore().enqueue(sessionDbId, session.contentSessionId, message);
@@ -370,8 +508,11 @@ export class SessionManager {
       throw error; // Don't continue if we can't persist
     }
 
-    const emitter = this.sessionQueues.get(sessionDbId);
-    emitter?.emit('message');
+    if (this.getBatchConfig().summaryMode === 'immediate') {
+      this.flushSession(sessionDbId, 'count');
+    } else {
+      this.armAgeTimer(sessionDbId);
+    }
   }
 
   /**
@@ -432,6 +573,8 @@ export class SessionManager {
     // 4. Cleanup
     this.sessions.delete(sessionDbId);
     this.sessionQueues.delete(sessionDbId);
+    this.clearFlushTimer(sessionDbId);
+    this.flushReasons.delete(sessionDbId);
 
     logger.info('SESSION', 'Session deleted', {
       sessionId: sessionDbId,
@@ -456,6 +599,8 @@ export class SessionManager {
 
     this.sessions.delete(sessionDbId);
     this.sessionQueues.delete(sessionDbId);
+    this.clearFlushTimer(sessionDbId);
+    this.flushReasons.delete(sessionDbId);
 
     logger.info('SESSION', 'Session removed from active sessions', {
       sessionId: sessionDbId,
@@ -628,7 +773,7 @@ export class SessionManager {
    * Messages are marked as 'processing' when yielded and must be marked 'processed'
    * by the SDK agent after successful completion.
    */
-  async *getMessageIterator(sessionDbId: number): AsyncIterableIterator<PendingMessageWithId> {
+  async *getMessageIterator(sessionDbId: number): AsyncIterableIterator<PendingMessageBatch> {
     // Auto-initialize from database if needed (handles worker restarts)
     let session = this.sessions.get(sessionDbId);
     if (!session) {
@@ -648,6 +793,9 @@ export class SessionManager {
     for await (const message of processor.createIterator({
       sessionDbId,
       signal: session.abortController.signal,
+      isFlushReady: () => this.isFlushReady(sessionDbId),
+      consumeFlushReason: () => this.consumeFlushReason(sessionDbId),
+      getClaimLimit: () => this.getClaimLimit(),
       onIdleTimeout: () => {
         logger.info('SESSION', 'Triggering abort due to idle timeout to kill subprocess', { sessionDbId });
         session.idleTimedOut = true;
@@ -656,14 +804,20 @@ export class SessionManager {
     })) {
       // Track earliest timestamp for accurate observation timestamps
       // This ensures backlog messages get their original timestamps, not current time
-      if (session.earliestPendingTimestamp === null) {
-        session.earliestPendingTimestamp = message._originalTimestamp;
-      } else {
-        session.earliestPendingTimestamp = Math.min(session.earliestPendingTimestamp, message._originalTimestamp);
-      }
+      const oldestTimestamp = Math.min(...message.messages.map(item => item._originalTimestamp));
+      session.earliestPendingTimestamp = session.earliestPendingTimestamp === null
+        ? oldestTimestamp
+        : Math.min(session.earliestPendingTimestamp, oldestTimestamp);
 
       // Update generator activity for stale detection (Issue #1099)
       session.lastGeneratorActivity = Date.now();
+
+      const observationCount = message.messages.filter(item => item.type === 'observation').length;
+      const hasSummary = message.messages.some(item => item.type === 'summarize');
+      if (hasSummary) session.summaryRequested = false;
+      logger.info('QUEUE', `FLUSH reason=${message.reason} n=${observationCount} summary=${hasSummary}`, {
+        sessionId: sessionDbId
+      });
 
       yield message;
     }

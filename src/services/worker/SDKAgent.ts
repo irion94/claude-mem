@@ -371,74 +371,63 @@ export class SDKAgent {
     };
 
     // Consume pending messages from SessionManager (event-driven, no polling)
-    for await (const message of this.sessionManager.getMessageIterator(session.sessionDbId)) {
+    for await (const batch of this.sessionManager.getMessageIterator(session.sessionDbId)) {
+      const messages = batch.messages;
       // CLAIM-CONFIRM: Track message ID for confirmProcessed() after successful storage
       // The message is now in 'processing' status in DB until ResponseProcessor calls confirmProcessed()
-      session.processingMessageIds.push(message._persistentId);
+      session.processingMessageIds.push(...messages.map(message => message._persistentId));
+
+      const lastMessage = messages.at(-1)!;
 
       // Capture subagent identity from the claimed message so ResponseProcessor
       // can label observation rows with the originating Claude Code subagent.
       // Always overwrite (even with null) so a main-session message after a subagent
       // message clears the stale identity; otherwise mixed batches could mislabel.
-      session.pendingAgentId = message.agentId ?? null;
-      session.pendingAgentType = message.agentType ?? null;
+      session.pendingAgentId = lastMessage.agentId ?? null;
+      session.pendingAgentType = lastMessage.agentType ?? null;
 
       // Capture cwd from each message for worktree support
-      if (message.cwd) {
-        cwdTracker.lastCwd = message.cwd;
+      const lastWithCwd = messages.findLast(message => message.cwd);
+      if (lastWithCwd?.cwd) cwdTracker.lastCwd = lastWithCwd.cwd;
+
+      const observations = messages.filter(message => message.type === 'observation');
+      const latestObservation = observations.at(-1);
+      if (latestObservation?.prompt_number !== undefined) {
+        session.lastPromptNumber = latestObservation.prompt_number;
       }
 
-      if (message.type === 'observation') {
-        // Update last prompt number
-        if (message.prompt_number !== undefined) {
-          session.lastPromptNumber = message.prompt_number;
-        }
-
-        const obsPrompt = buildObservationPrompt({
+      const promptParts: string[] = [];
+      if (observations.length > 0) {
+        promptParts.push(buildObservationPrompt(observations.map(message => ({
           id: 0, // Not used in prompt
           tool_name: message.tool_name!,
           tool_input: JSON.stringify(message.tool_input),
           tool_output: JSON.stringify(message.tool_response),
-          created_at_epoch: Date.now(),
+          created_at_epoch: message._originalTimestamp,
           cwd: message.cwd
-        });
+        }))));
+      }
 
-        // Add to shared conversation history for provider interop
-        session.conversationHistory.push({ role: 'user', content: obsPrompt });
-
-        yield {
-          type: 'user',
-          message: {
-            role: 'user',
-            content: obsPrompt
-          },
-          session_id: session.contentSessionId,
-          parent_tool_use_id: null,
-          isSynthetic: true
-        };
-      } else if (message.type === 'summarize') {
-        const summaryPrompt = buildSummaryPrompt({
+      const latestSummary = messages.filter(message => message.type === 'summarize').at(-1);
+      if (latestSummary) {
+        promptParts.push(buildSummaryPrompt({
           id: session.sessionDbId,
           memory_session_id: session.memorySessionId,
           project: session.project,
           user_prompt: session.userPrompt,
-          last_assistant_message: message.last_assistant_message || ''
-        }, mode);
-
-        // Add to shared conversation history for provider interop
-        session.conversationHistory.push({ role: 'user', content: summaryPrompt });
-
-        yield {
-          type: 'user',
-          message: {
-            role: 'user',
-            content: summaryPrompt
-          },
-          session_id: session.contentSessionId,
-          parent_tool_use_id: null,
-          isSynthetic: true
-        };
+          last_assistant_message: latestSummary.last_assistant_message || ''
+        }, mode));
       }
+
+      const prompt = promptParts.join('\n\n');
+      session.conversationHistory.push({ role: 'user', content: prompt });
+      yield {
+        type: 'user',
+        message: { role: 'user', content: prompt },
+        session_id: session.contentSessionId,
+        parent_tool_use_id: null,
+        isSynthetic: true
+      };
     }
   }
 

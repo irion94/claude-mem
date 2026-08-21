@@ -85,8 +85,9 @@ export class SessionCompletionHandler {
    * /api/sessions/complete keep working even after the worker self-cleans.
    */
   async completeByDbId(sessionDbId: number): Promise<void> {
-    // Finalize first so the DB and broadcast state are consistent even if
-    // deleteSession hangs on a slow subprocess exit.
+    // Flush durable pending work before finalize marks it abandoned.
+    await this.sessionManager.flushAndWait(sessionDbId, 'exit');
+
     this.finalizeSession(sessionDbId);
 
     // Abort SDK agent and clean in-memory state. Idempotent: deleteSession

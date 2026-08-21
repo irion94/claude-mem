@@ -213,6 +213,7 @@ export async function processAgentResponse(
   }
   // Clear the tracking array after confirmation
   session.processingMessageIds = [];
+  sessionManager.notifyQueueProcessed?.(session.sessionDbId);
 
   void notifyTelegram({
     observations: labeledObservations,

@@ -56,6 +56,8 @@ export interface ActiveSession {
   // so subagent work is attributable. NULL / undefined means the batch came from the main session.
   pendingAgentId?: string | null;
   pendingAgentType?: string | null;
+  summaryRequested?: boolean;
+  lastAssistantMessage?: string;
 }
 
 export interface PendingMessage {
@@ -79,6 +81,13 @@ export interface PendingMessage {
 export interface PendingMessageWithId extends PendingMessage {
   _persistentId: number;
   _originalTimestamp: number;
+}
+
+export type FlushReason = 'count' | 'age' | 'exit' | 'new' | 'startup';
+
+export interface PendingMessageBatch {
+  messages: PendingMessageWithId[];
+  reason: FlushReason;
 }
 
 export interface ObservationData {

@@ -64,6 +64,16 @@ describe('PendingMessageStore - Self-Healing claimNextMessage', () => {
     expect(afterClaim.status).toBe('processing');
   });
 
+  test('stuck processing messages are recovered by a batch claim', () => {
+    const stuckId = enqueueMessage();
+    const pendingId = enqueueMessage();
+    makeMessageStaleProcessing(stuckId);
+
+    const claimed = store.claimPendingBatch(sessionDbId);
+
+    expect(claimed.map(message => message.id)).toEqual([stuckId, pendingId]);
+  });
+
   test('actively processing messages are NOT recovered', () => {
     // Enqueue two messages
     const activeId = enqueueMessage();

@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import { PendingMessageStore, PersistentPendingMessage } from '../sqlite/PendingMessageStore.js';
-import type { PendingMessageWithId } from '../worker-types.js';
+import type { FlushReason, PendingMessageBatch, PendingMessageWithId } from '../worker-types.js';
 import { logger } from '../../utils/logger.js';
 
 const IDLE_TIMEOUT_MS = 3 * 60 * 1000; // 3 minutes
@@ -10,6 +10,9 @@ export interface CreateIteratorOptions {
   signal: AbortSignal;
   /** Called when idle timeout occurs - should trigger abort to kill subprocess */
   onIdleTimeout?: () => void;
+  isFlushReady?: () => boolean;
+  consumeFlushReason?: () => FlushReason | null;
+  getClaimLimit?: () => number | undefined;
 }
 
 export class SessionQueueProcessor {
@@ -29,30 +32,34 @@ export class SessionQueueProcessor {
    * The callback should trigger abortController.abort() to kill the SDK subprocess.
    * Just returning from the iterator is NOT enough - the subprocess stays alive!
    */
-  async *createIterator(options: CreateIteratorOptions): AsyncIterableIterator<PendingMessageWithId> {
-    const { sessionDbId, signal, onIdleTimeout } = options;
+  async *createIterator(options: CreateIteratorOptions): AsyncIterableIterator<PendingMessageBatch> {
+    const { sessionDbId, signal, onIdleTimeout, getClaimLimit } = options;
+    const isFlushReady = options.isFlushReady ?? (() => true);
+    const consumeFlushReason = options.consumeFlushReason ?? (() => 'count');
     let lastActivityTime = Date.now();
 
     while (!signal.aborted) {
-      // Claim phase: atomically claim next pending message (marks as 'processing')
-      // Self-heals any stale processing messages before claiming
-      let persistentMessage: PersistentPendingMessage | null = null;
-      try {
-        persistentMessage = this.store.claimNextMessage(sessionDbId);
-      } catch (error) {
-        if (signal.aborted) return;
-        const normalizedError = error instanceof Error ? error : new Error(String(error));
-        logger.error('QUEUE', 'Failed to claim next message', { sessionDbId }, normalizedError);
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        continue;
-      }
-
-      if (persistentMessage) {
-        // Reset activity time when we successfully yield a message
-        lastActivityTime = Date.now();
-        // Yield the message for processing (it's marked as 'processing' in DB)
-        yield this.toPendingMessageWithId(persistentMessage);
-        continue;
+      if (isFlushReady()) {
+        try {
+          const reason = consumeFlushReason();
+          const persistentMessages = typeof this.store.claimPendingBatch === 'function'
+            ? this.store.claimPendingBatch(sessionDbId, getClaimLimit?.())
+            : [this.store.claimNextMessage(sessionDbId)].filter((message): message is PersistentPendingMessage => message !== null);
+          if (reason && persistentMessages.length > 0) {
+            lastActivityTime = Date.now();
+            yield {
+              reason,
+              messages: persistentMessages.map(message => this.toPendingMessageWithId(message)),
+            };
+            continue;
+          }
+        } catch (error) {
+          if (signal.aborted) return;
+          const normalizedError = error instanceof Error ? error : new Error(String(error));
+          logger.error('QUEUE', 'Failed to claim pending batch', { sessionDbId }, normalizedError);
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          continue;
+        }
       }
 
       // Wait phase: queue empty - wait for wake-up event or timeout

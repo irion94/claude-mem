@@ -1119,6 +1119,7 @@ export class WorkerService {
 
       try {
         const session = this.sessionManager.initializeSession(sessionDbId);
+        this.sessionManager.flushSession(sessionDbId, 'startup', false);
         this.startSessionProcessor(session, 'startup-recovery');
         result.sessionsStarted++;
         result.startedSessionIds.push(sessionDbId);

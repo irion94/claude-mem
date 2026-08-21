@@ -168,7 +168,7 @@ describe('SessionQueueProcessor', () => {
 
         // Should have received exactly one message
         expect(results).toHaveLength(1);
-        expect(results[0]._persistentId).toBe(1);
+        expect(results[0].messages[0]._persistentId).toBe(1);
 
         // Store's claimNextMessage should have been called at least twice
         // (once returning message, once returning null)
@@ -278,7 +278,7 @@ describe('SessionQueueProcessor', () => {
         // Should have received exactly one message
         expect(results.length).toBeGreaterThanOrEqual(1);
         if (results.length > 0) {
-          expect(results[0]._persistentId).toBe(1);
+          expect(results[0].messages[0]._persistentId).toBe(1);
         }
       });
     });
@@ -324,7 +324,7 @@ describe('SessionQueueProcessor', () => {
         // Get first message
         const firstResult = await iterator.next();
         expect(firstResult.done).toBe(false);
-        expect(firstResult.value._persistentId).toBe(1);
+        expect(firstResult.value.messages[0]._persistentId).toBe(1);
 
         // Now abort and complete iteration
         abortController.abort();
@@ -427,7 +427,7 @@ describe('SessionQueueProcessor', () => {
         abortController.abort();
 
         expect(result.done).toBe(false);
-        expect(result.value).toMatchObject({
+        expect(result.value.messages[0]).toMatchObject({
           _persistentId: 42,
           _originalTimestamp: 1704067200000,
           type: 'observation',
