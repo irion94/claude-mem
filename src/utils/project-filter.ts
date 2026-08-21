@@ -17,8 +17,18 @@ function resolvePath(inputPath: string): string {
   return path.resolve(expanded);
 }
 
+/**
+ * Return true when the current process is one of the observer's own model runs.
+ * The agy shim (baton packages/mem-lane) sets CLAUDE_MEM_OBSERVER=1 on every
+ * rung it spawns, so hooks inherited by that process must never observe it.
+ */
+export function isSelfObserverEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.CLAUDE_MEM_OBSERVER === '1';
+}
+
 /** Return true when cwd is the claude-mem data directory or one of its descendants. */
 export function isSelfObserverCwd(cwd: string, dataDir: string): boolean {
+  if (isSelfObserverEnv()) return true;
   const resolvedCwd = resolvePath(cwd);
   const roots = [resolvePath(dataDir), resolvePath(OBSERVER_SESSIONS_DIR)];
 

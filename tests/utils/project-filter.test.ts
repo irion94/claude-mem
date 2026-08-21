@@ -6,12 +6,31 @@
  */
 
 import { describe, it, expect } from 'bun:test';
-import { isProjectExcluded, isSelfObserverCwd } from '../../src/utils/project-filter.js';
+import { isProjectExcluded, isSelfObserverCwd, isSelfObserverEnv } from '../../src/utils/project-filter.js';
 import { homedir } from 'os';
 import { join } from 'path';
 import { OBSERVER_SESSIONS_DIR } from '../../src/shared/paths.js';
 
 describe('Project Filter', () => {
+  describe('isSelfObserverEnv', () => {
+    it('is true only when CLAUDE_MEM_OBSERVER=1', () => {
+      expect(isSelfObserverEnv({ CLAUDE_MEM_OBSERVER: '1' })).toBe(true);
+      expect(isSelfObserverEnv({ CLAUDE_MEM_OBSERVER: '0' })).toBe(false);
+      expect(isSelfObserverEnv({})).toBe(false);
+    });
+
+    it('makes isSelfObserverCwd true for any cwd when the marker is set', () => {
+      const prev = process.env.CLAUDE_MEM_OBSERVER;
+      process.env.CLAUDE_MEM_OBSERVER = '1';
+      try {
+        expect(isSelfObserverCwd('/tmp/unrelated-project', '/tmp/data')).toBe(true);
+      } finally {
+        if (prev === undefined) delete process.env.CLAUDE_MEM_OBSERVER;
+        else process.env.CLAUDE_MEM_OBSERVER = prev;
+      }
+    });
+  });
+
   describe('isSelfObserverCwd', () => {
     const dataDir = join('/tmp', 'claude-mem-test');
 
