@@ -83,7 +83,7 @@ export interface PendingMessageWithId extends PendingMessage {
   _originalTimestamp: number;
 }
 
-export type FlushReason = 'count' | 'age' | 'exit' | 'new' | 'startup';
+export type FlushReason = 'count' | 'age' | 'exit' | 'new' | 'startup' | 'idle' | 'bytes';
 
 export interface PendingMessageBatch {
   messages: PendingMessageWithId[];

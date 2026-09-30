@@ -6,6 +6,19 @@ import { expandHomePath } from './config.js';
 import { loadWatchState, saveWatchState, type TranscriptWatchState } from './state.js';
 import type { TranscriptWatchConfig, TranscriptSchema, WatchTarget } from './types.js';
 import { TranscriptEventProcessor } from './processor.js';
+import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
+import { USER_SETTINGS_PATH } from '../../shared/paths.js';
+
+type WatcherSettings = Pick<ReturnType<typeof SettingsDefaultsManager.loadFromFile>,
+  'CLAUDE_MEM_TRANSCRIPTS_MAX_AGE_HOURS' | 'CLAUDE_MEM_TRANSCRIPTS_MAX_TAILERS'>;
+
+interface TranscriptWatcherOptions {
+  getSettings?: () => Partial<WatcherSettings>;
+  now?: () => number;
+}
+
+const DEFAULT_MAX_AGE_HOURS = 48;
+const DEFAULT_MAX_TAILERS = 512;
 
 interface TailState {
   offset: number;
@@ -66,11 +79,13 @@ class FileTailer {
     }
 
     this.tailState.offset = size;
-    this.onOffset(this.tailState.offset);
 
     const combined = this.tailState.partial + data;
     const lines = combined.split('\n');
     this.tailState.partial = lines.pop() ?? '';
+    // Persist the start of the unfinished line, so a tailer re-created from
+    // the saved offset (eviction, restart) re-reads it instead of losing it.
+    this.onOffset(size - Buffer.byteLength(this.tailState.partial, 'utf8'));
 
     for (const line of lines) {
       const trimmed = line.trim();
@@ -83,11 +98,23 @@ class FileTailer {
 export class TranscriptWatcher {
   private processor = new TranscriptEventProcessor();
   private tailers = new Map<string, FileTailer>();
+  // Watch name that owns each tailer, so a rescan can close its own tailers
+  // even when their file disappeared from the glob.
+  private tailerWatches = new Map<string, string>();
   private state: TranscriptWatchState;
   private rescanTimers: Array<NodeJS.Timeout> = [];
+  // Size of each file present at startup: with `startAtEnd`, a file that only gets a
+  // tailer later (it turned fresh) resumes from here instead of replaying its backlog.
+  private startupSizes = new Map<string, number>();
+  // Skipped-file count of the last cap warning per watch, to warn on change only.
+  private capWarnedSkipped = new Map<string, number>();
+  private getSettings: () => Partial<WatcherSettings>;
+  private now: () => number;
 
-  constructor(private config: TranscriptWatchConfig, private statePath: string) {
+  constructor(private config: TranscriptWatchConfig, private statePath: string, options: TranscriptWatcherOptions = {}) {
     this.state = loadWatchState(statePath);
+    this.getSettings = options.getSettings ?? (() => SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH));
+    this.now = options.now ?? Date.now;
   }
 
   async start(): Promise<void> {
@@ -101,6 +128,7 @@ export class TranscriptWatcher {
       tailer.close();
     }
     this.tailers.clear();
+    this.tailerWatches.clear();
     for (const timer of this.rescanTimers) {
       clearInterval(timer);
     }
@@ -115,22 +143,83 @@ export class TranscriptWatcher {
     }
 
     const resolvedPath = expandHomePath(watch.path);
-    const files = this.resolveWatchFiles(resolvedPath);
-
-    for (const filePath of files) {
-      await this.addTailer(filePath, watch, schema, true);
-    }
+    await this.syncTailers(resolvedPath, watch, schema, true);
 
     const rescanIntervalMs = watch.rescanIntervalMs ?? 5000;
       const timer = setInterval(async () => {
-      const newFiles = this.resolveWatchFiles(resolvedPath);
-      for (const filePath of newFiles) {
-        if (!this.tailers.has(filePath)) {
-          await this.addTailer(filePath, watch, schema, false);
-        }
-      }
+      await this.syncTailers(resolvedPath, watch, schema, false);
     }, rescanIntervalMs);
     this.rescanTimers.push(timer);
+  }
+
+  private getLimits(): { maxAgeMs: number; maxTailers: number } {
+    const settings = this.getSettings();
+    const parsedMaxAgeHours = parseFloat(settings.CLAUDE_MEM_TRANSCRIPTS_MAX_AGE_HOURS ?? String(DEFAULT_MAX_AGE_HOURS));
+    const parsedMaxTailers = parseInt(settings.CLAUDE_MEM_TRANSCRIPTS_MAX_TAILERS ?? String(DEFAULT_MAX_TAILERS), 10);
+    const maxAgeHours = Number.isFinite(parsedMaxAgeHours) ? parsedMaxAgeHours : DEFAULT_MAX_AGE_HOURS;
+    return {
+      maxAgeMs: maxAgeHours > 0 ? maxAgeHours * 60 * 60 * 1000 : Infinity,
+      maxTailers: Number.isFinite(parsedMaxTailers) && parsedMaxTailers > 0 ? parsedMaxTailers : DEFAULT_MAX_TAILERS,
+    };
+  }
+
+  /**
+   * Tail the freshest files of a watch: only files whose mtime is inside the age
+   * window, at most `maxTailers` in total across all watches. Tailers whose file
+   * fell out of that set are closed (one fs.watch fd per tailer).
+   */
+  private async syncTailers(
+    resolvedPath: string,
+    watch: WatchTarget,
+    schema: TranscriptSchema,
+    initialDiscovery: boolean
+  ): Promise<void> {
+    const { maxAgeMs, maxTailers } = this.getLimits();
+    const now = this.now();
+    const files = this.resolveWatchFiles(resolvedPath);
+
+    const fresh: Array<{ filePath: string; mtimeMs: number }> = [];
+    for (const filePath of files) {
+      try {
+        const { mtimeMs, size } = statSync(filePath);
+        if (initialDiscovery) this.startupSizes.set(filePath, size);
+        if (now - mtimeMs <= maxAgeMs) fresh.push({ filePath, mtimeMs });
+      } catch (error: unknown) {
+        logger.debug('WORKER', 'Failed to stat transcript file for age check', { file: filePath }, error instanceof Error ? error : undefined);
+      }
+    }
+    fresh.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+    const ownTailers = [...this.tailerWatches]
+      .filter(([, watchName]) => watchName === watch.name)
+      .map(([filePath]) => filePath);
+    const slots = Math.max(0, maxTailers - (this.tailers.size - ownTailers.length));
+    const keep = new Set(fresh.slice(0, slots).map(entry => entry.filePath));
+
+    for (const filePath of ownTailers) {
+      if (keep.has(filePath)) continue;
+      this.tailers.get(filePath)?.close();
+      this.tailers.delete(filePath);
+      this.tailerWatches.delete(filePath);
+      logger.debug('WORKER', 'Stopped watching transcript file', { file: filePath, watch: watch.name });
+    }
+
+    for (const filePath of keep) {
+      await this.addTailer(filePath, watch, schema);
+    }
+
+    const skipped = Math.max(0, fresh.length - slots);
+    if (skipped === 0) {
+      this.capWarnedSkipped.delete(watch.name);
+    } else if (this.capWarnedSkipped.get(watch.name) !== skipped) {
+      this.capWarnedSkipped.set(watch.name, skipped);
+      logger.warn('WORKER', 'Transcript tailer cap reached, skipping older files', {
+        watch: watch.name,
+        maxTailers,
+        fresh: fresh.length,
+        skipped
+      });
+    }
   }
 
   private resolveSchema(watch: WatchTarget): TranscriptSchema | null {
@@ -169,23 +258,18 @@ export class TranscriptWatcher {
   private async addTailer(
     filePath: string,
     watch: WatchTarget,
-    schema: TranscriptSchema,
-    initialDiscovery: boolean
+    schema: TranscriptSchema
   ): Promise<void> {
     if (this.tailers.has(filePath)) return;
 
     const sessionIdOverride = this.extractSessionIdFromPath(filePath);
 
     let offset = this.state.offsets[filePath] ?? 0;
-    // `startAtEnd` is useful on worker startup to avoid replaying the full backlog,
-    // but new transcript files must be read from byte 0 or we lose session_meta/user_message.
-    if (offset === 0 && watch.startAtEnd && initialDiscovery) {
-      try {
-        offset = statSync(filePath).size;
-      } catch (error: unknown) {
-        logger.debug('WORKER', 'Failed to stat file for startAtEnd offset', { file: filePath }, error instanceof Error ? error : undefined);
-        offset = 0;
-      }
+    // `startAtEnd` is useful for files present at worker startup to avoid replaying the full
+    // backlog, but new transcript files must be read from byte 0 or we lose session_meta/user_message.
+    // A startup file tailed later resumes from its startup size, so appends made since are kept.
+    if (offset === 0 && watch.startAtEnd) {
+      offset = this.startupSizes.get(filePath) ?? 0;
     }
 
     const tailer = new FileTailer(
@@ -202,6 +286,7 @@ export class TranscriptWatcher {
 
     tailer.start();
     this.tailers.set(filePath, tailer);
+    this.tailerWatches.set(filePath, watch.name);
     logger.info('TRANSCRIPT', 'Watching transcript file', {
       file: filePath,
       watch: watch.name,

@@ -824,6 +824,9 @@ export class WorkerService {
         if (session.idleTimedOut) {
           session.idleTimedOut = false; // Reset flag
           if (pendingCount === 0) {
+            // A deferred session-end summary still needs this session: keep it in
+            // memory; its idle timer or the exit flush starts a new generator.
+            if (this.sessionManager.hasDeferredSummary(session.sessionDbId)) return;
             this.terminateSession(session.sessionDbId, 'idle_timeout');
             return;
           }

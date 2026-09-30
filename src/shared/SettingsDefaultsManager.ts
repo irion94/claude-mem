@@ -54,12 +54,18 @@ export interface SettingsDefaults {
   CLAUDE_MEM_FOLDER_USE_LOCAL_MD: string;  // 'true' | 'false' - write to CLAUDE.local.md instead of CLAUDE.md
   CLAUDE_MEM_TRANSCRIPTS_ENABLED: string;  // 'true' | 'false' - enable transcript watcher ingestion for Codex and other transcript-based clients
   CLAUDE_MEM_TRANSCRIPTS_CONFIG_PATH: string;  // Path to transcript watcher config JSON
+  CLAUDE_MEM_TRANSCRIPTS_MAX_AGE_HOURS: string;  // Only tail transcript files modified within this many hours; 0 or negative disables the age filter, unparsable falls back to 48
+  CLAUDE_MEM_TRANSCRIPTS_MAX_TAILERS: string;  // Hard cap on concurrently tailed transcript files (one fd each), freshest first; unparsable or < 1 falls back to 512
   // Process Management
   CLAUDE_MEM_MAX_CONCURRENT_AGENTS: string;  // Max concurrent Claude SDK agent subprocesses (default: 2)
   CLAUDE_MEM_SESSION_MAX_AGE_HOURS: string;  // Wall-clock session age limit in hours; 0 or negative disables the guard (default: 4, #1590)
   CLAUDE_MEM_BATCH_MAX_MESSAGES: string;
   CLAUDE_MEM_BATCH_MAX_AGE_SEC: string;
+  CLAUDE_MEM_BATCH_MAX_BYTES: string;  // Flush when pending tool_input + tool_response chars exceed this; also caps one batch (an oversized message goes alone)
   CLAUDE_MEM_SUMMARY_MODE: string;
+  CLAUDE_MEM_SUMMARY_CADENCE: string;  // 'every-stop' | 'session-end' - summarize on every Stop, or once at session exit / after idle
+  CLAUDE_MEM_SUMMARY_IDLE_SEC: string;  // session-end cadence: produce the deferred summary after this many idle seconds; 0 = exit only
+  CLAUDE_MEM_FLUSH_ON_NEW_SESSION: string;  // 'true' | 'false' - a new session flushes the pending batches of idle sessions; false = age timer only
   // Exclusion Settings
   CLAUDE_MEM_EXCLUDED_PROJECTS: string;  // Comma-separated glob patterns for excluded project paths
   CLAUDE_MEM_FOLDER_MD_EXCLUDE: string;  // JSON array of folder paths to exclude from CLAUDE.md generation
@@ -135,12 +141,18 @@ export class SettingsDefaultsManager {
     CLAUDE_MEM_FOLDER_USE_LOCAL_MD: 'false',  // When true, writes to CLAUDE.local.md instead of CLAUDE.md
     CLAUDE_MEM_TRANSCRIPTS_ENABLED: 'true',
     CLAUDE_MEM_TRANSCRIPTS_CONFIG_PATH: join(homedir(), '.claude-mem', 'transcript-watch.json'),
+    CLAUDE_MEM_TRANSCRIPTS_MAX_AGE_HOURS: '48',  // Only tail transcript files modified within this many hours; 0 or negative disables the age filter
+    CLAUDE_MEM_TRANSCRIPTS_MAX_TAILERS: '512',  // Hard cap on concurrently tailed transcript files (one fd each), freshest first
     // Process Management
     CLAUDE_MEM_MAX_CONCURRENT_AGENTS: '2',  // Max concurrent Claude SDK agent subprocesses
     CLAUDE_MEM_SESSION_MAX_AGE_HOURS: '4',  // Wall-clock session age limit in hours; 0 or negative disables the guard
     CLAUDE_MEM_BATCH_MAX_MESSAGES: '5',
     CLAUDE_MEM_BATCH_MAX_AGE_SEC: '300',
+    CLAUDE_MEM_BATCH_MAX_BYTES: '200000',  // chars of tool_input + tool_response per batch
     CLAUDE_MEM_SUMMARY_MODE: 'batched',
+    CLAUDE_MEM_SUMMARY_CADENCE: 'every-stop',  // 'session-end' = one summary per session (exit flush or idle timeout)
+    CLAUDE_MEM_SUMMARY_IDLE_SEC: '1800',  // session-end cadence: idle seconds before the deferred summary is produced; 0 = exit only
+    CLAUDE_MEM_FLUSH_ON_NEW_SESSION: 'true',  // 'false' = idle sessions flush only by CLAUDE_MEM_BATCH_MAX_AGE_SEC
     // Exclusion Settings
     CLAUDE_MEM_EXCLUDED_PROJECTS: '',  // Comma-separated glob patterns for excluded project paths
     CLAUDE_MEM_FOLDER_MD_EXCLUDE: '[]',  // JSON array of folder paths to exclude from CLAUDE.md generation

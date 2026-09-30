@@ -22,7 +22,11 @@ import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js
 import { USER_SETTINGS_PATH } from '../../shared/paths.js';
 
 type BatchSettings = Pick<ReturnType<typeof SettingsDefaultsManager.loadFromFile>,
-  'CLAUDE_MEM_BATCH_MAX_MESSAGES' | 'CLAUDE_MEM_BATCH_MAX_AGE_SEC' | 'CLAUDE_MEM_SUMMARY_MODE'>;
+  'CLAUDE_MEM_BATCH_MAX_MESSAGES' | 'CLAUDE_MEM_BATCH_MAX_AGE_SEC' | 'CLAUDE_MEM_SUMMARY_MODE' |
+  'CLAUDE_MEM_SUMMARY_CADENCE' | 'CLAUDE_MEM_SUMMARY_IDLE_SEC' | 'CLAUDE_MEM_FLUSH_ON_NEW_SESSION' |
+  'CLAUDE_MEM_BATCH_MAX_BYTES'>;
+
+export type SummarizeOutcome = 'queued' | 'deferred' | 'skipped';
 
 interface SessionManagerOptions {
   getSettings?: () => Partial<BatchSettings>;
@@ -103,6 +107,12 @@ export class SessionManager {
   private pendingStore: PendingMessageStore | null = null;
   private flushReasons = new Map<number, import('../worker-types.js').FlushReason>();
   private flushTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  // Flushes whose claim was cut short by the byte budget; the remainder is
+  // flushed with the same reason once the current batch is processed.
+  private truncatedFlushes = new Map<number, import('../worker-types.js').FlushReason>();
+  // SUMMARY_CADENCE=session-end: sessions whose summary is wanted but not yet
+  // queued, mapped to their idle timer (null when the idle trigger is disabled).
+  private deferredSummaries = new Map<number, ReturnType<typeof setTimeout> | null>();
   private onFlushRequestedCallback?: (sessionDbId: number) => void;
   private getSettings: () => Partial<BatchSettings>;
   private now: () => number;
@@ -139,17 +149,90 @@ export class SessionManager {
     this.onFlushRequestedCallback = callback;
   }
 
-  private getBatchConfig(): { maxMessages: number; maxAgeMs: number; summaryMode: 'batched' | 'immediate' } {
+  private getBatchConfig(): {
+    maxMessages: number;
+    maxAgeMs: number;
+    maxBytes: number;
+    summaryMode: 'batched' | 'immediate';
+    summaryCadence: 'every-stop' | 'session-end';
+    summaryIdleMs: number;
+    flushOnNewSession: boolean;
+  } {
     const settings = this.getSettings();
     const parsedMaxMessages = parseInt(settings.CLAUDE_MEM_BATCH_MAX_MESSAGES ?? '5', 10);
     const parsedMaxAgeSec = parseFloat(settings.CLAUDE_MEM_BATCH_MAX_AGE_SEC ?? '300');
+    const parsedMaxBytes = parseInt(settings.CLAUDE_MEM_BATCH_MAX_BYTES ?? '200000', 10);
+    const parsedSummaryIdleSec = parseFloat(settings.CLAUDE_MEM_SUMMARY_IDLE_SEC ?? '1800');
     const maxMessages = Number.isFinite(parsedMaxMessages) ? Math.max(1, parsedMaxMessages) : 5;
     const maxAgeSec = Number.isFinite(parsedMaxAgeSec) ? Math.max(0, parsedMaxAgeSec) : 300;
+    const summaryIdleSec = Number.isFinite(parsedSummaryIdleSec) ? Math.max(0, parsedSummaryIdleSec) : 1800;
     return {
       maxMessages,
       maxAgeMs: maxAgeSec * 1000,
+      maxBytes: Number.isFinite(parsedMaxBytes) && parsedMaxBytes > 0 ? parsedMaxBytes : 200000,
       summaryMode: settings.CLAUDE_MEM_SUMMARY_MODE === 'immediate' ? 'immediate' : 'batched',
+      summaryCadence: settings.CLAUDE_MEM_SUMMARY_CADENCE === 'session-end' ? 'session-end' : 'every-stop',
+      summaryIdleMs: summaryIdleSec * 1000,
+      flushOnNewSession: settings.CLAUDE_MEM_FLUSH_ON_NEW_SESSION !== 'false',
     };
+  }
+
+  /**
+   * (Re)start the idle countdown of a deferred summary. Any activity on the
+   * session (another Stop, a new observation) pushes the deadline out.
+   * An idle setting of 0 disables the idle trigger; exit still materializes.
+   */
+  private armSummaryIdleTimer(sessionDbId: number): void {
+    this.clearSummaryIdleTimer(sessionDbId);
+    const { summaryIdleMs } = this.getBatchConfig();
+    if (summaryIdleMs <= 0) {
+      this.deferredSummaries.set(sessionDbId, null);
+      return;
+    }
+    const timer = this.setTimer(() => {
+      try {
+        if (this.materializeDeferredSummary(sessionDbId)) {
+          this.flushSession(sessionDbId, 'idle');
+        }
+      } catch (error) {
+        logger.error('QUEUE', 'Failed to produce deferred summary after idle timeout', {
+          sessionId: sessionDbId
+        }, error instanceof Error ? error : new Error(String(error)));
+      }
+    }, summaryIdleMs);
+    this.deferredSummaries.set(sessionDbId, timer);
+  }
+
+  private clearSummaryIdleTimer(sessionDbId: number): void {
+    const timer = this.deferredSummaries.get(sessionDbId);
+    if (timer) this.clearTimer(timer);
+  }
+
+  /**
+   * Turn a deferred summary into a durable summarize row so the next flush
+   * carries it. Returns false when no summary was deferred for the session.
+   */
+  private materializeDeferredSummary(sessionDbId: number): boolean {
+    if (!this.deferredSummaries.has(sessionDbId)) return false;
+    this.clearSummaryIdleTimer(sessionDbId);
+    this.deferredSummaries.delete(sessionDbId);
+    const session = this.sessions.get(sessionDbId);
+    if (!session) return false;
+    this.enqueueSummarize(session, session.lastAssistantMessage);
+    return true;
+  }
+
+  /**
+   * True while a session-end summary is wanted but not yet queued. Generator
+   * exit paths must keep such a session in memory, or the summary is lost.
+   */
+  hasDeferredSummary(sessionDbId: number): boolean {
+    return this.deferredSummaries.has(sessionDbId);
+  }
+
+  private dropDeferredSummary(sessionDbId: number): void {
+    this.clearSummaryIdleTimer(sessionDbId);
+    this.deferredSummaries.delete(sessionDbId);
   }
 
   private clearFlushTimer(sessionDbId: number): void {
@@ -196,14 +279,19 @@ export class SessionManager {
 
   notifyQueueProcessed(sessionDbId: number): void {
     const pendingCount = this.getPendingStore().getPendingCount(sessionDbId);
+    const truncatedReason = this.truncatedFlushes.get(sessionDbId);
+    this.truncatedFlushes.delete(sessionDbId);
     if (pendingCount === 0) {
       this.sessionQueues.get(sessionDbId)?.emit('drained');
     } else if (this.getClaimLimit() === 1) {
       this.flushSession(sessionDbId, 'count');
+    } else if (truncatedReason) {
+      this.flushSession(sessionDbId, truncatedReason);
     }
   }
 
   async flushAndWait(sessionDbId: number, reason: import('../worker-types.js').FlushReason): Promise<void> {
+    if (reason === 'exit') this.materializeDeferredSummary(sessionDbId);
     if (this.getPendingStore().getPendingCount(sessionDbId) === 0) return;
     const emitter = this.sessionQueues.get(sessionDbId);
     if (!emitter) throw new Error(`Cannot flush inactive session ${sessionDbId}`);
@@ -366,9 +454,13 @@ export class SessionManager {
 
     // A newly initialized session is the opportunity to revive pending work
     // belonging to sessions whose generator is no longer alive.
-    for (const [orphanId, orphan] of this.sessions) {
-      if (orphanId !== sessionDbId && !orphan.generatorPromise) {
-        this.flushSession(orphanId, 'new');
+    // FLUSH_ON_NEW_SESSION=false leaves them to their own age timer instead,
+    // so a new session does not force an early LLM call per idle session.
+    if (this.getBatchConfig().flushOnNewSession) {
+      for (const [orphanId, orphan] of this.sessions) {
+        if (orphanId !== sessionDbId && !orphan.generatorPromise) {
+          this.flushSession(orphanId, 'new');
+        }
       }
     }
 
@@ -446,10 +538,14 @@ export class SessionManager {
       throw error; // Don't continue if we can't persist
     }
 
+    if (this.deferredSummaries.has(sessionDbId)) this.armSummaryIdleTimer(sessionDbId);
+
     const config = this.getBatchConfig();
     const info = this.getPendingStore().getPendingBatchInfo(sessionDbId);
     if (info.observationCount >= config.maxMessages) {
       this.flushSession(sessionDbId, 'count');
+    } else if (info.pendingBytes > config.maxBytes) {
+      this.flushSession(sessionDbId, 'bytes');
     } else {
       this.armAgeTimer(sessionDbId);
     }
@@ -462,7 +558,7 @@ export class SessionManager {
    * CRITICAL: Persists to database FIRST before adding to in-memory queue.
    * This ensures summarize requests survive worker crashes.
    */
-  queueSummarize(sessionDbId: number, lastAssistantMessage?: string): void {
+  queueSummarize(sessionDbId: number, lastAssistantMessage?: string): SummarizeOutcome {
     // Auto-initialize from database if needed (handles worker restarts)
     let session = this.sessions.get(sessionDbId);
     if (!session) {
@@ -478,16 +574,39 @@ export class SessionManager {
         sessionId: sessionDbId,
         contentSessionId: session.contentSessionId
       });
-      return;
+      return 'skipped';
     }
 
-    // CRITICAL: Persist to database FIRST
+    session.summaryRequested = true;
+    session.lastAssistantMessage = lastAssistantMessage;
+
+    // SUMMARY_CADENCE=session-end: only remember that a summary is wanted.
+    // It is queued once, on the exit flush or after the session went idle.
+    if (this.getBatchConfig().summaryCadence === 'session-end') {
+      this.armSummaryIdleTimer(sessionDbId);
+      logger.info('QUEUE', `DEFERRED | sessionDbId=${sessionDbId} | type=summarize | cadence=session-end`, {
+        sessionId: sessionDbId
+      });
+      return 'deferred';
+    }
+
+    this.enqueueSummarize(session, lastAssistantMessage);
+
+    if (this.getBatchConfig().summaryMode === 'immediate') {
+      this.flushSession(sessionDbId, 'count');
+    } else {
+      this.armAgeTimer(sessionDbId);
+    }
+    return 'queued';
+  }
+
+  /** CRITICAL: Persist the summarize request to the database. */
+  private enqueueSummarize(session: ActiveSession, lastAssistantMessage?: string): void {
+    const sessionDbId = session.sessionDbId;
     const message: PendingMessage = {
       type: 'summarize',
       last_assistant_message: lastAssistantMessage
     };
-    session.summaryRequested = true;
-    session.lastAssistantMessage = lastAssistantMessage;
 
     try {
       const messageId = this.getPendingStore().enqueue(sessionDbId, session.contentSessionId, message);
@@ -506,12 +625,6 @@ export class SessionManager {
         }, new Error(String(error)));
       }
       throw error; // Don't continue if we can't persist
-    }
-
-    if (this.getBatchConfig().summaryMode === 'immediate') {
-      this.flushSession(sessionDbId, 'count');
-    } else {
-      this.armAgeTimer(sessionDbId);
     }
   }
 
@@ -575,6 +688,8 @@ export class SessionManager {
     this.sessionQueues.delete(sessionDbId);
     this.clearFlushTimer(sessionDbId);
     this.flushReasons.delete(sessionDbId);
+    this.truncatedFlushes.delete(sessionDbId);
+    this.dropDeferredSummary(sessionDbId);
 
     logger.info('SESSION', 'Session deleted', {
       sessionId: sessionDbId,
@@ -601,6 +716,8 @@ export class SessionManager {
     this.sessionQueues.delete(sessionDbId);
     this.clearFlushTimer(sessionDbId);
     this.flushReasons.delete(sessionDbId);
+    this.truncatedFlushes.delete(sessionDbId);
+    this.dropDeferredSummary(sessionDbId);
 
     logger.info('SESSION', 'Session removed from active sessions', {
       sessionId: sessionDbId,
@@ -697,6 +814,10 @@ export class SessionManager {
       const pendingCount = this.getPendingStore().getPendingCount(sessionDbId);
       if (pendingCount > 0) continue;
 
+      // A deferred summary is pending work too: its idle timer or the exit
+      // flush still has to produce it (SUMMARY_CADENCE=session-end).
+      if (this.deferredSummaries.has(sessionDbId)) continue;
+
       // No generator + no pending work + old enough = stale
       const sessionAge = now - session.startTime;
       if (sessionAge > MAX_SESSION_IDLE_MS) {
@@ -716,6 +837,17 @@ export class SessionManager {
    * Shutdown all active sessions
    */
   async shutdownAll(): Promise<void> {
+    // Persist deferred summaries so the startup flush of the next worker
+    // produces them instead of losing them with the in-memory state.
+    for (const sessionDbId of Array.from(this.deferredSummaries.keys())) {
+      try {
+        this.materializeDeferredSummary(sessionDbId);
+      } catch (error) {
+        logger.warn('SESSION', 'Failed to persist deferred summary on shutdown', {
+          sessionId: sessionDbId
+        }, error instanceof Error ? error : new Error(String(error)));
+      }
+    }
     const sessionIds = Array.from(this.sessions.keys());
     await Promise.all(sessionIds.map(id => this.deleteSession(id)));
   }
@@ -796,6 +928,7 @@ export class SessionManager {
       isFlushReady: () => this.isFlushReady(sessionDbId),
       consumeFlushReason: () => this.consumeFlushReason(sessionDbId),
       getClaimLimit: () => this.getClaimLimit(),
+      getClaimMaxBytes: () => this.getBatchConfig().maxBytes,
       onIdleTimeout: () => {
         logger.info('SESSION', 'Triggering abort due to idle timeout to kill subprocess', { sessionDbId });
         session.idleTimedOut = true;
@@ -811,6 +944,12 @@ export class SessionManager {
 
       // Update generator activity for stale detection (Issue #1099)
       session.lastGeneratorActivity = Date.now();
+
+      // Rows still pending right after a claim were cut off by the byte
+      // budget: keep flushing them once this batch has been processed.
+      if (this.getPendingStore().getPendingBatchInfo(sessionDbId).count > 0) {
+        this.truncatedFlushes.set(sessionDbId, message.reason);
+      }
 
       const observationCount = message.messages.filter(item => item.type === 'observation').length;
       const hasSummary = message.messages.some(item => item.type === 'summarize');

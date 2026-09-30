@@ -330,7 +330,10 @@ export class SessionRoutes extends BaseRouteHandler {
         try {
           const pendingStore = this.sessionManager.getPendingMessageStore();
           const pendingNow = pendingStore.getPendingCount(sessionDbId);
-          if (session.lastSummaryStored === true && pendingNow === 0) {
+          // A deferred session-end summary (requested after the stored one)
+          // still needs the session, so it is not self-cleaned yet.
+          if (session.lastSummaryStored === true && pendingNow === 0
+              && !this.sessionManager.hasDeferredSummary(sessionDbId)) {
             logger.info('SESSION', 'Stop-hook self-clean: summary persisted + queue drained → finalizing', {
               sessionId: sessionDbId
             });
@@ -558,7 +561,13 @@ export class SessionRoutes extends BaseRouteHandler {
 
     const { last_assistant_message } = req.body;
 
-    this.sessionManager.queueSummarize(sessionDbId, last_assistant_message);
+    const outcome = this.sessionManager.queueSummarize(sessionDbId, last_assistant_message);
+
+    // SUMMARY_CADENCE=session-end: nothing was queued, no generator to start.
+    if (outcome === 'deferred') {
+      res.json({ status: 'deferred' });
+      return;
+    }
 
     // CRITICAL: Ensure SDK agent is running to consume the queue
     this.ensureGeneratorRunning(sessionDbId, 'summarize');
@@ -766,7 +775,14 @@ export class SessionRoutes extends BaseRouteHandler {
     }
 
     // Queue summarize
-    this.sessionManager.queueSummarize(sessionDbId, last_assistant_message);
+    const outcome = this.sessionManager.queueSummarize(sessionDbId, last_assistant_message);
+
+    // SUMMARY_CADENCE=session-end: nothing was queued, no generator to start.
+    // The summary is produced on the exit flush or after the idle timeout.
+    if (outcome === 'deferred') {
+      res.json({ status: 'deferred' });
+      return;
+    }
 
     // Ensure SDK agent is running
     this.ensureGeneratorRunning(sessionDbId, 'summarize');
