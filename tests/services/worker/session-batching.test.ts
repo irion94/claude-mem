@@ -400,6 +400,20 @@ describe('SessionManager observation batching', () => {
       expect(batch[0].last_assistant_message).toBe('latest');
     });
 
+    test('hasDeferredSummary reports a deferred summary until it is materialized', async () => {
+      settings.CLAUDE_MEM_SUMMARY_CADENCE = 'session-end';
+      expect(manager.hasDeferredSummary(sessionDbId)).toBe(false);
+      manager.queueSummarize(sessionDbId, 'latest');
+      expect(manager.hasDeferredSummary(sessionDbId)).toBe(true);
+
+      const done = manager.flushAndWait(sessionDbId, 'exit');
+      expect(manager.hasDeferredSummary(sessionDbId)).toBe(false);
+
+      store.claimPendingBatch(sessionDbId).forEach(message => store.confirmProcessed(message.id));
+      manager.notifyQueueProcessed(sessionDbId);
+      await done;
+    });
+
     test('removing a session clears its deferred summary idle timer', () => {
       settings.CLAUDE_MEM_SUMMARY_CADENCE = 'session-end';
       manager.queueSummarize(sessionDbId, 'latest');

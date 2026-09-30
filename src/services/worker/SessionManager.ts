@@ -222,6 +222,14 @@ export class SessionManager {
     return true;
   }
 
+  /**
+   * True while a session-end summary is wanted but not yet queued. Generator
+   * exit paths must keep such a session in memory, or the summary is lost.
+   */
+  hasDeferredSummary(sessionDbId: number): boolean {
+    return this.deferredSummaries.has(sessionDbId);
+  }
+
   private dropDeferredSummary(sessionDbId: number): void {
     this.clearSummaryIdleTimer(sessionDbId);
     this.deferredSummaries.delete(sessionDbId);

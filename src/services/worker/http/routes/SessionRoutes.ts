@@ -330,7 +330,10 @@ export class SessionRoutes extends BaseRouteHandler {
         try {
           const pendingStore = this.sessionManager.getPendingMessageStore();
           const pendingNow = pendingStore.getPendingCount(sessionDbId);
-          if (session.lastSummaryStored === true && pendingNow === 0) {
+          // A deferred session-end summary (requested after the stored one)
+          // still needs the session, so it is not self-cleaned yet.
+          if (session.lastSummaryStored === true && pendingNow === 0
+              && !this.sessionManager.hasDeferredSummary(sessionDbId)) {
             logger.info('SESSION', 'Stop-hook self-clean: summary persisted + queue drained → finalizing', {
               sessionId: sessionDbId
             });
