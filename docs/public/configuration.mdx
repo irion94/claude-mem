@@ -30,6 +30,7 @@ Settings are managed in `~/.claude-mem/settings.json`. The file is auto-created 
 | `CLAUDE_MEM_SUMMARY_MODE` | `batched` | `batched` folds the latest requested summary into the next flush; `immediate` preserves the previous summary behavior. |
 | `CLAUDE_MEM_SUMMARY_CADENCE` | `every-stop` | `every-stop` queues a summary on every Stop hook; `session-end` only marks the session and produces one summary on the exit flush (SessionEnd) or after `CLAUDE_MEM_SUMMARY_IDLE_SEC` of inactivity. |
 | `CLAUDE_MEM_SUMMARY_IDLE_SEC` | `1800` | With `session-end` cadence: seconds without activity before the deferred summary is produced. `0` = only on exit. |
+| `CLAUDE_MEM_FLUSH_ON_NEW_SESSION` | `true` | Initializing a session flushes the pending batches of other idle sessions. `false` leaves them to the `CLAUDE_MEM_BATCH_MAX_AGE_SEC` timer. |
 
 ### Gemini Provider Settings
 

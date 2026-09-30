@@ -23,7 +23,7 @@ import { USER_SETTINGS_PATH } from '../../shared/paths.js';
 
 type BatchSettings = Pick<ReturnType<typeof SettingsDefaultsManager.loadFromFile>,
   'CLAUDE_MEM_BATCH_MAX_MESSAGES' | 'CLAUDE_MEM_BATCH_MAX_AGE_SEC' | 'CLAUDE_MEM_SUMMARY_MODE' |
-  'CLAUDE_MEM_SUMMARY_CADENCE' | 'CLAUDE_MEM_SUMMARY_IDLE_SEC'>;
+  'CLAUDE_MEM_SUMMARY_CADENCE' | 'CLAUDE_MEM_SUMMARY_IDLE_SEC' | 'CLAUDE_MEM_FLUSH_ON_NEW_SESSION'>;
 
 export type SummarizeOutcome = 'queued' | 'deferred' | 'skipped';
 
@@ -151,6 +151,7 @@ export class SessionManager {
     summaryMode: 'batched' | 'immediate';
     summaryCadence: 'every-stop' | 'session-end';
     summaryIdleMs: number;
+    flushOnNewSession: boolean;
   } {
     const settings = this.getSettings();
     const parsedMaxMessages = parseInt(settings.CLAUDE_MEM_BATCH_MAX_MESSAGES ?? '5', 10);
@@ -165,6 +166,7 @@ export class SessionManager {
       summaryMode: settings.CLAUDE_MEM_SUMMARY_MODE === 'immediate' ? 'immediate' : 'batched',
       summaryCadence: settings.CLAUDE_MEM_SUMMARY_CADENCE === 'session-end' ? 'session-end' : 'every-stop',
       summaryIdleMs: summaryIdleSec * 1000,
+      flushOnNewSession: settings.CLAUDE_MEM_FLUSH_ON_NEW_SESSION !== 'false',
     };
   }
 
@@ -433,9 +435,13 @@ export class SessionManager {
 
     // A newly initialized session is the opportunity to revive pending work
     // belonging to sessions whose generator is no longer alive.
-    for (const [orphanId, orphan] of this.sessions) {
-      if (orphanId !== sessionDbId && !orphan.generatorPromise) {
-        this.flushSession(orphanId, 'new');
+    // FLUSH_ON_NEW_SESSION=false leaves them to their own age timer instead,
+    // so a new session does not force an early LLM call per idle session.
+    if (this.getBatchConfig().flushOnNewSession) {
+      for (const [orphanId, orphan] of this.sessions) {
+        if (orphanId !== sessionDbId && !orphan.generatorPromise) {
+          this.flushSession(orphanId, 'new');
+        }
       }
     }
 

@@ -62,6 +62,7 @@ export interface SettingsDefaults {
   CLAUDE_MEM_SUMMARY_MODE: string;
   CLAUDE_MEM_SUMMARY_CADENCE: string;  // 'every-stop' | 'session-end' - summarize on every Stop, or once at session exit / after idle
   CLAUDE_MEM_SUMMARY_IDLE_SEC: string;  // session-end cadence: produce the deferred summary after this many idle seconds; 0 = exit only
+  CLAUDE_MEM_FLUSH_ON_NEW_SESSION: string;  // 'true' | 'false' - a new session flushes the pending batches of idle sessions; false = age timer only
   // Exclusion Settings
   CLAUDE_MEM_EXCLUDED_PROJECTS: string;  // Comma-separated glob patterns for excluded project paths
   CLAUDE_MEM_FOLDER_MD_EXCLUDE: string;  // JSON array of folder paths to exclude from CLAUDE.md generation
@@ -145,6 +146,7 @@ export class SettingsDefaultsManager {
     CLAUDE_MEM_SUMMARY_MODE: 'batched',
     CLAUDE_MEM_SUMMARY_CADENCE: 'every-stop',  // 'session-end' = one summary per session (exit flush or idle timeout)
     CLAUDE_MEM_SUMMARY_IDLE_SEC: '1800',  // session-end cadence: idle seconds before the deferred summary is produced; 0 = exit only
+    CLAUDE_MEM_FLUSH_ON_NEW_SESSION: 'true',  // 'false' = idle sessions flush only by CLAUDE_MEM_BATCH_MAX_AGE_SEC
     // Exclusion Settings
     CLAUDE_MEM_EXCLUDED_PROJECTS: '',  // Comma-separated glob patterns for excluded project paths
     CLAUDE_MEM_FOLDER_MD_EXCLUDE: '[]',  // JSON array of folder paths to exclude from CLAUDE.md generation

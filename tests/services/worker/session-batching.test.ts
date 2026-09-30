@@ -139,6 +139,28 @@ describe('SessionManager observation batching', () => {
     manager.removeSessionImmediate(secondId);
   });
 
+  test('FLUSH_ON_NEW_SESSION=false leaves idle sessions to their age timer', () => {
+    settings.CLAUDE_MEM_FLUSH_ON_NEW_SESSION = 'false';
+    settings.CLAUDE_MEM_BATCH_MAX_AGE_SEC = '10';
+    queueObservation();
+    const orphan = manager.getSession(sessionDbId)!;
+    orphan.generatorPromise = null;
+    expect(timers).toHaveLength(1);
+
+    const secondId = createSDKSession(db, 'second-session', 'project', 'prompt');
+    manager.initializeSession(secondId);
+
+    expect(manager.isFlushReady(sessionDbId)).toBe(false);
+    expect(flushes).toHaveLength(0);
+    expect(timers[0].cleared).toBe(false);
+    expect(timers[0].delay).toBe(10_000);
+
+    timers[0].callback();
+    expect(flushes).toEqual([sessionDbId]);
+    expect(manager.consumeFlushReason(sessionDbId)).toBe('age');
+    manager.removeSessionImmediate(secondId);
+  });
+
   test('three batched summarize requests remain pending until one observation flush', () => {
     manager.queueSummarize(sessionDbId, 'first');
     manager.queueSummarize(sessionDbId, 'second');
