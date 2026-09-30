@@ -13,6 +13,7 @@ export interface CreateIteratorOptions {
   isFlushReady?: () => boolean;
   consumeFlushReason?: () => FlushReason | null;
   getClaimLimit?: () => number | undefined;
+  getClaimMaxBytes?: () => number | undefined;
 }
 
 export class SessionQueueProcessor {
@@ -33,7 +34,7 @@ export class SessionQueueProcessor {
    * Just returning from the iterator is NOT enough - the subprocess stays alive!
    */
   async *createIterator(options: CreateIteratorOptions): AsyncIterableIterator<PendingMessageBatch> {
-    const { sessionDbId, signal, onIdleTimeout, getClaimLimit } = options;
+    const { sessionDbId, signal, onIdleTimeout, getClaimLimit, getClaimMaxBytes } = options;
     const isFlushReady = options.isFlushReady ?? (() => true);
     const consumeFlushReason = options.consumeFlushReason ?? (() => 'count');
     let lastActivityTime = Date.now();
@@ -43,7 +44,7 @@ export class SessionQueueProcessor {
         try {
           const reason = consumeFlushReason();
           const persistentMessages = typeof this.store.claimPendingBatch === 'function'
-            ? this.store.claimPendingBatch(sessionDbId, getClaimLimit?.())
+            ? this.store.claimPendingBatch(sessionDbId, getClaimLimit?.(), getClaimMaxBytes?.())
             : [this.store.claimNextMessage(sessionDbId)].filter((message): message is PersistentPendingMessage => message !== null);
           if (reason && persistentMessages.length > 0) {
             lastActivityTime = Date.now();

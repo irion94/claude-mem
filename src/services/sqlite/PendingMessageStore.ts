@@ -29,6 +29,11 @@ export interface PersistentPendingMessage {
   agent_id: string | null;
 }
 
+/** Size of a pending message for the batch byte budget (chars of tool I/O). */
+function messageBytes(message: PersistentPendingMessage): number {
+  return (message.tool_input?.length ?? 0) + (message.tool_response?.length ?? 0);
+}
+
 /**
  * PendingMessageStore - Persistent work queue for SDK messages
  *
@@ -144,8 +149,13 @@ export class PendingMessageStore {
     return claimTx(sessionDbId) as PersistentPendingMessage | null;
   }
 
-  /** Atomically claim every currently pending message for one model turn. */
-  claimPendingBatch(sessionDbId: number, limit?: number): PersistentPendingMessage[] {
+  /**
+   * Atomically claim every currently pending message for one model turn.
+   * With maxBytes, the batch stops before the message that would push the
+   * summed tool_input + tool_response length over the budget; the first
+   * message is always claimed, so an oversized message goes out alone.
+   */
+  claimPendingBatch(sessionDbId: number, limit?: number, maxBytes?: number): PersistentPendingMessage[] {
     const claimTx = this.db.transaction((sessionId: number, batchLimit?: number) => {
       const now = Date.now();
       this.db.prepare(`
@@ -161,6 +171,15 @@ export class PendingMessageStore {
         ${batchLimit ? 'LIMIT ?' : ''}
       `).all(...(batchLimit ? [sessionId, batchLimit] : [sessionId])) as PersistentPendingMessage[];
 
+      if (maxBytes !== undefined && maxBytes > 0) {
+        let bytes = 0;
+        const overBudget = messages.findIndex((message, index) => {
+          bytes += messageBytes(message);
+          return index > 0 && bytes > maxBytes;
+        });
+        if (overBudget !== -1) messages.splice(overBudget);
+      }
+
       if (messages.length > 0) {
         const placeholders = messages.map(() => '?').join(',');
         this.db.prepare(`
@@ -175,19 +194,31 @@ export class PendingMessageStore {
     return claimTx(sessionDbId, limit) as PersistentPendingMessage[];
   }
 
-  getPendingBatchInfo(sessionDbId: number): { count: number; observationCount: number; oldestTimestamp: number | null } {
+  getPendingBatchInfo(sessionDbId: number): {
+    count: number;
+    observationCount: number;
+    oldestTimestamp: number | null;
+    pendingBytes: number;
+  } {
     const result = this.db.prepare(`
       SELECT
         COUNT(*) AS count,
         SUM(CASE WHEN message_type = 'observation' THEN 1 ELSE 0 END) AS observation_count,
-        MIN(created_at_epoch) AS oldest_timestamp
+        MIN(created_at_epoch) AS oldest_timestamp,
+        SUM(COALESCE(LENGTH(tool_input), 0) + COALESCE(LENGTH(tool_response), 0)) AS pending_bytes
       FROM pending_messages
       WHERE session_db_id = ? AND status = 'pending'
-    `).get(sessionDbId) as { count: number; observation_count: number | null; oldest_timestamp: number | null };
+    `).get(sessionDbId) as {
+      count: number;
+      observation_count: number | null;
+      oldest_timestamp: number | null;
+      pending_bytes: number | null;
+    };
     return {
       count: result.count,
       observationCount: result.observation_count ?? 0,
       oldestTimestamp: result.oldest_timestamp,
+      pendingBytes: result.pending_bytes ?? 0,
     };
   }
 

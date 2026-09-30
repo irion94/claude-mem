@@ -23,7 +23,8 @@ import { USER_SETTINGS_PATH } from '../../shared/paths.js';
 
 type BatchSettings = Pick<ReturnType<typeof SettingsDefaultsManager.loadFromFile>,
   'CLAUDE_MEM_BATCH_MAX_MESSAGES' | 'CLAUDE_MEM_BATCH_MAX_AGE_SEC' | 'CLAUDE_MEM_SUMMARY_MODE' |
-  'CLAUDE_MEM_SUMMARY_CADENCE' | 'CLAUDE_MEM_SUMMARY_IDLE_SEC' | 'CLAUDE_MEM_FLUSH_ON_NEW_SESSION'>;
+  'CLAUDE_MEM_SUMMARY_CADENCE' | 'CLAUDE_MEM_SUMMARY_IDLE_SEC' | 'CLAUDE_MEM_FLUSH_ON_NEW_SESSION' |
+  'CLAUDE_MEM_BATCH_MAX_BYTES'>;
 
 export type SummarizeOutcome = 'queued' | 'deferred' | 'skipped';
 
@@ -106,6 +107,9 @@ export class SessionManager {
   private pendingStore: PendingMessageStore | null = null;
   private flushReasons = new Map<number, import('../worker-types.js').FlushReason>();
   private flushTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  // Flushes whose claim was cut short by the byte budget; the remainder is
+  // flushed with the same reason once the current batch is processed.
+  private truncatedFlushes = new Map<number, import('../worker-types.js').FlushReason>();
   // SUMMARY_CADENCE=session-end: sessions whose summary is wanted but not yet
   // queued, mapped to their idle timer (null when the idle trigger is disabled).
   private deferredSummaries = new Map<number, ReturnType<typeof setTimeout> | null>();
@@ -148,6 +152,7 @@ export class SessionManager {
   private getBatchConfig(): {
     maxMessages: number;
     maxAgeMs: number;
+    maxBytes: number;
     summaryMode: 'batched' | 'immediate';
     summaryCadence: 'every-stop' | 'session-end';
     summaryIdleMs: number;
@@ -156,6 +161,7 @@ export class SessionManager {
     const settings = this.getSettings();
     const parsedMaxMessages = parseInt(settings.CLAUDE_MEM_BATCH_MAX_MESSAGES ?? '5', 10);
     const parsedMaxAgeSec = parseFloat(settings.CLAUDE_MEM_BATCH_MAX_AGE_SEC ?? '300');
+    const parsedMaxBytes = parseInt(settings.CLAUDE_MEM_BATCH_MAX_BYTES ?? '200000', 10);
     const parsedSummaryIdleSec = parseFloat(settings.CLAUDE_MEM_SUMMARY_IDLE_SEC ?? '1800');
     const maxMessages = Number.isFinite(parsedMaxMessages) ? Math.max(1, parsedMaxMessages) : 5;
     const maxAgeSec = Number.isFinite(parsedMaxAgeSec) ? Math.max(0, parsedMaxAgeSec) : 300;
@@ -163,6 +169,7 @@ export class SessionManager {
     return {
       maxMessages,
       maxAgeMs: maxAgeSec * 1000,
+      maxBytes: Number.isFinite(parsedMaxBytes) && parsedMaxBytes > 0 ? parsedMaxBytes : 200000,
       summaryMode: settings.CLAUDE_MEM_SUMMARY_MODE === 'immediate' ? 'immediate' : 'batched',
       summaryCadence: settings.CLAUDE_MEM_SUMMARY_CADENCE === 'session-end' ? 'session-end' : 'every-stop',
       summaryIdleMs: summaryIdleSec * 1000,
@@ -264,10 +271,14 @@ export class SessionManager {
 
   notifyQueueProcessed(sessionDbId: number): void {
     const pendingCount = this.getPendingStore().getPendingCount(sessionDbId);
+    const truncatedReason = this.truncatedFlushes.get(sessionDbId);
+    this.truncatedFlushes.delete(sessionDbId);
     if (pendingCount === 0) {
       this.sessionQueues.get(sessionDbId)?.emit('drained');
     } else if (this.getClaimLimit() === 1) {
       this.flushSession(sessionDbId, 'count');
+    } else if (truncatedReason) {
+      this.flushSession(sessionDbId, truncatedReason);
     }
   }
 
@@ -525,6 +536,8 @@ export class SessionManager {
     const info = this.getPendingStore().getPendingBatchInfo(sessionDbId);
     if (info.observationCount >= config.maxMessages) {
       this.flushSession(sessionDbId, 'count');
+    } else if (info.pendingBytes > config.maxBytes) {
+      this.flushSession(sessionDbId, 'bytes');
     } else {
       this.armAgeTimer(sessionDbId);
     }
@@ -667,6 +680,7 @@ export class SessionManager {
     this.sessionQueues.delete(sessionDbId);
     this.clearFlushTimer(sessionDbId);
     this.flushReasons.delete(sessionDbId);
+    this.truncatedFlushes.delete(sessionDbId);
     this.dropDeferredSummary(sessionDbId);
 
     logger.info('SESSION', 'Session deleted', {
@@ -694,6 +708,7 @@ export class SessionManager {
     this.sessionQueues.delete(sessionDbId);
     this.clearFlushTimer(sessionDbId);
     this.flushReasons.delete(sessionDbId);
+    this.truncatedFlushes.delete(sessionDbId);
     this.dropDeferredSummary(sessionDbId);
 
     logger.info('SESSION', 'Session removed from active sessions', {
@@ -905,6 +920,7 @@ export class SessionManager {
       isFlushReady: () => this.isFlushReady(sessionDbId),
       consumeFlushReason: () => this.consumeFlushReason(sessionDbId),
       getClaimLimit: () => this.getClaimLimit(),
+      getClaimMaxBytes: () => this.getBatchConfig().maxBytes,
       onIdleTimeout: () => {
         logger.info('SESSION', 'Triggering abort due to idle timeout to kill subprocess', { sessionDbId });
         session.idleTimedOut = true;
@@ -920,6 +936,12 @@ export class SessionManager {
 
       // Update generator activity for stale detection (Issue #1099)
       session.lastGeneratorActivity = Date.now();
+
+      // Rows still pending right after a claim were cut off by the byte
+      // budget: keep flushing them once this batch has been processed.
+      if (this.getPendingStore().getPendingBatchInfo(sessionDbId).count > 0) {
+        this.truncatedFlushes.set(sessionDbId, message.reason);
+      }
 
       const observationCount = message.messages.filter(item => item.type === 'observation').length;
       const hasSummary = message.messages.some(item => item.type === 'summarize');

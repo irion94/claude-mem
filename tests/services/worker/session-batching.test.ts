@@ -199,6 +199,78 @@ describe('SessionManager observation batching', () => {
     expect(manager.consumeFlushReason(sessionDbId)).toBe('count');
   });
 
+  describe('BATCH_MAX_BYTES', () => {
+    // JSON.stringify('x'.repeat(n)) is n + 2 chars; the response {"ok":true} adds 11.
+    const queueSized = (chars: number, tool = 'Read') => manager.queueObservation(sessionDbId, {
+      tool_name: tool,
+      tool_input: 'x'.repeat(chars - 2),
+      tool_response: { ok: true },
+      prompt_number: 1,
+    });
+    const confirmBatch = (batch: { messages: { _persistentId: number }[] }) => {
+      batch.messages.forEach(message => store.confirmProcessed(message._persistentId));
+      manager.notifyQueueProcessed(sessionDbId);
+    };
+
+    test('pending bytes over the budget flush before MAX_MESSAGES is reached', () => {
+      settings.CLAUDE_MEM_BATCH_MAX_BYTES = '1000';
+
+      queueSized(600);
+      expect(flushes).toHaveLength(0);
+      queueSized(600);
+
+      expect(flushes).toEqual([sessionDbId]);
+      expect(manager.consumeFlushReason(sessionDbId)).toBe('bytes');
+    });
+
+    test('defaults to a 200000-char budget', () => {
+      queueSized(150_000);
+      expect(flushes).toHaveLength(0);
+      queueSized(60_000);
+
+      expect(manager.consumeFlushReason(sessionDbId)).toBe('bytes');
+    });
+
+    test('store claim stops before the message that would exceed the budget', () => {
+      queueSized(400);
+      queueSized(400);
+      queueSized(400);
+
+      expect(store.claimPendingBatch(sessionDbId, undefined, 1000)).toHaveLength(2);
+      expect(store.claimPendingBatch(sessionDbId, undefined, 1000)).toHaveLength(1);
+    });
+
+    test('store claim always takes at least one message', () => {
+      queueSized(5_000);
+
+      expect(store.claimPendingBatch(sessionDbId, undefined, 1000)).toHaveLength(1);
+    });
+
+    test('a single message over the budget is flushed alone, then the rest follows', async () => {
+      settings.CLAUDE_MEM_BATCH_MAX_BYTES = '1000';
+      queueSized(100, 'Small');
+      queueSized(5_000, 'Huge');
+      queueSized(100, 'After');
+      expect(manager.consumeFlushReason(sessionDbId)).toBe('bytes');
+      manager.flushSession(sessionDbId, 'bytes');
+
+      const iterator = manager.getMessageIterator(sessionDbId);
+      const tools = async () => {
+        const { value } = await iterator.next();
+        confirmBatch(value);
+        return value.messages.map((message: { tool_name?: string }) => message.tool_name);
+      };
+
+      expect(await tools()).toEqual(['Small']);
+      expect(await tools()).toEqual(['Huge']);
+      expect(await tools()).toEqual(['After']);
+      expect(store.getPendingCount(sessionDbId)).toBe(0);
+
+      manager.getSession(sessionDbId)!.abortController.abort();
+      await iterator.return?.(undefined);
+    });
+  });
+
   // deleteSession reaps supervisor-tracked processes of the live install, so
   // tests that reach it (reaper, shutdown) record the call instead.
   const stubDeleteSession = (): number[] => {

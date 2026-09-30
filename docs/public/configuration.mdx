@@ -27,6 +27,7 @@ Settings are managed in `~/.claude-mem/settings.json`. The file is auto-created 
 |---------|---------|-------------|
 | `CLAUDE_MEM_BATCH_MAX_MESSAGES` | `5` | Flush when this many observation messages are pending. Set to `1` for the previous per-message behavior. |
 | `CLAUDE_MEM_BATCH_MAX_AGE_SEC` | `300` | Flush when the oldest pending message reaches this age in seconds. |
+| `CLAUDE_MEM_BATCH_MAX_BYTES` | `200000` | Flush when the summed `tool_input` + `tool_response` chars of pending messages exceed this, even below `CLAUDE_MEM_BATCH_MAX_MESSAGES`. Also caps a single batch; a message larger than the budget is sent alone. |
 | `CLAUDE_MEM_SUMMARY_MODE` | `batched` | `batched` folds the latest requested summary into the next flush; `immediate` preserves the previous summary behavior. |
 | `CLAUDE_MEM_SUMMARY_CADENCE` | `every-stop` | `every-stop` queues a summary on every Stop hook; `session-end` only marks the session and produces one summary on the exit flush (SessionEnd) or after `CLAUDE_MEM_SUMMARY_IDLE_SEC` of inactivity. |
 | `CLAUDE_MEM_SUMMARY_IDLE_SEC` | `1800` | With `session-end` cadence: seconds without activity before the deferred summary is produced. `0` = only on exit. |
