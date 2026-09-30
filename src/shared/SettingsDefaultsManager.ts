@@ -54,6 +54,8 @@ export interface SettingsDefaults {
   CLAUDE_MEM_FOLDER_USE_LOCAL_MD: string;  // 'true' | 'false' - write to CLAUDE.local.md instead of CLAUDE.md
   CLAUDE_MEM_TRANSCRIPTS_ENABLED: string;  // 'true' | 'false' - enable transcript watcher ingestion for Codex and other transcript-based clients
   CLAUDE_MEM_TRANSCRIPTS_CONFIG_PATH: string;  // Path to transcript watcher config JSON
+  CLAUDE_MEM_TRANSCRIPTS_MAX_AGE_HOURS: string;  // Only tail transcript files modified within this many hours; 0 or negative disables the age filter, unparsable falls back to 48
+  CLAUDE_MEM_TRANSCRIPTS_MAX_TAILERS: string;  // Hard cap on concurrently tailed transcript files (one fd each), freshest first; unparsable or < 1 falls back to 512
   // Process Management
   CLAUDE_MEM_MAX_CONCURRENT_AGENTS: string;  // Max concurrent Claude SDK agent subprocesses (default: 2)
   CLAUDE_MEM_SESSION_MAX_AGE_HOURS: string;  // Wall-clock session age limit in hours; 0 or negative disables the guard (default: 4, #1590)
@@ -139,6 +141,8 @@ export class SettingsDefaultsManager {
     CLAUDE_MEM_FOLDER_USE_LOCAL_MD: 'false',  // When true, writes to CLAUDE.local.md instead of CLAUDE.md
     CLAUDE_MEM_TRANSCRIPTS_ENABLED: 'true',
     CLAUDE_MEM_TRANSCRIPTS_CONFIG_PATH: join(homedir(), '.claude-mem', 'transcript-watch.json'),
+    CLAUDE_MEM_TRANSCRIPTS_MAX_AGE_HOURS: '48',  // Only tail transcript files modified within this many hours; 0 or negative disables the age filter
+    CLAUDE_MEM_TRANSCRIPTS_MAX_TAILERS: '512',  // Hard cap on concurrently tailed transcript files (one fd each), freshest first
     // Process Management
     CLAUDE_MEM_MAX_CONCURRENT_AGENTS: '2',  // Max concurrent Claude SDK agent subprocesses
     CLAUDE_MEM_SESSION_MAX_AGE_HOURS: '4',  // Wall-clock session age limit in hours; 0 or negative disables the guard

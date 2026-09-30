@@ -6,6 +6,19 @@ import { expandHomePath } from './config.js';
 import { loadWatchState, saveWatchState, type TranscriptWatchState } from './state.js';
 import type { TranscriptWatchConfig, TranscriptSchema, WatchTarget } from './types.js';
 import { TranscriptEventProcessor } from './processor.js';
+import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
+import { USER_SETTINGS_PATH } from '../../shared/paths.js';
+
+type WatcherSettings = Pick<ReturnType<typeof SettingsDefaultsManager.loadFromFile>,
+  'CLAUDE_MEM_TRANSCRIPTS_MAX_AGE_HOURS' | 'CLAUDE_MEM_TRANSCRIPTS_MAX_TAILERS'>;
+
+interface TranscriptWatcherOptions {
+  getSettings?: () => Partial<WatcherSettings>;
+  now?: () => number;
+}
+
+const DEFAULT_MAX_AGE_HOURS = 48;
+const DEFAULT_MAX_TAILERS = 512;
 
 interface TailState {
   offset: number;
@@ -85,9 +98,15 @@ export class TranscriptWatcher {
   private tailers = new Map<string, FileTailer>();
   private state: TranscriptWatchState;
   private rescanTimers: Array<NodeJS.Timeout> = [];
+  // Files present at startup; `startAtEnd` applies to them even when they only get a tailer later.
+  private startupFiles = new Set<string>();
+  private getSettings: () => Partial<WatcherSettings>;
+  private now: () => number;
 
-  constructor(private config: TranscriptWatchConfig, private statePath: string) {
+  constructor(private config: TranscriptWatchConfig, private statePath: string, options: TranscriptWatcherOptions = {}) {
     this.state = loadWatchState(statePath);
+    this.getSettings = options.getSettings ?? (() => SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH));
+    this.now = options.now ?? Date.now;
   }
 
   async start(): Promise<void> {
@@ -115,22 +134,80 @@ export class TranscriptWatcher {
     }
 
     const resolvedPath = expandHomePath(watch.path);
-    const files = this.resolveWatchFiles(resolvedPath);
-
-    for (const filePath of files) {
-      await this.addTailer(filePath, watch, schema, true);
-    }
+    await this.syncTailers(resolvedPath, watch, schema, true);
 
     const rescanIntervalMs = watch.rescanIntervalMs ?? 5000;
       const timer = setInterval(async () => {
-      const newFiles = this.resolveWatchFiles(resolvedPath);
-      for (const filePath of newFiles) {
-        if (!this.tailers.has(filePath)) {
-          await this.addTailer(filePath, watch, schema, false);
-        }
-      }
+      await this.syncTailers(resolvedPath, watch, schema, false);
     }, rescanIntervalMs);
     this.rescanTimers.push(timer);
+  }
+
+  private getLimits(): { maxAgeMs: number; maxTailers: number } {
+    const settings = this.getSettings();
+    const parsedMaxAgeHours = parseFloat(settings.CLAUDE_MEM_TRANSCRIPTS_MAX_AGE_HOURS ?? String(DEFAULT_MAX_AGE_HOURS));
+    const parsedMaxTailers = parseInt(settings.CLAUDE_MEM_TRANSCRIPTS_MAX_TAILERS ?? String(DEFAULT_MAX_TAILERS), 10);
+    const maxAgeHours = Number.isFinite(parsedMaxAgeHours) ? parsedMaxAgeHours : DEFAULT_MAX_AGE_HOURS;
+    return {
+      maxAgeMs: maxAgeHours > 0 ? maxAgeHours * 60 * 60 * 1000 : Infinity,
+      maxTailers: Number.isFinite(parsedMaxTailers) && parsedMaxTailers > 0 ? parsedMaxTailers : DEFAULT_MAX_TAILERS,
+    };
+  }
+
+  /**
+   * Tail the freshest files of a watch: only files whose mtime is inside the age
+   * window, at most `maxTailers` in total across all watches. Tailers whose file
+   * fell out of that set are closed (one fs.watch fd per tailer).
+   */
+  private async syncTailers(
+    resolvedPath: string,
+    watch: WatchTarget,
+    schema: TranscriptSchema,
+    initialDiscovery: boolean
+  ): Promise<void> {
+    const { maxAgeMs, maxTailers } = this.getLimits();
+    const now = this.now();
+    const files = this.resolveWatchFiles(resolvedPath);
+    if (initialDiscovery) {
+      for (const filePath of files) this.startupFiles.add(filePath);
+    }
+
+    const fresh: Array<{ filePath: string; mtimeMs: number }> = [];
+    for (const filePath of files) {
+      try {
+        const { mtimeMs } = statSync(filePath);
+        if (now - mtimeMs <= maxAgeMs) fresh.push({ filePath, mtimeMs });
+      } catch (error: unknown) {
+        logger.debug('WORKER', 'Failed to stat transcript file for age check', { file: filePath }, error instanceof Error ? error : undefined);
+      }
+    }
+    fresh.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+    const ownTailers = files.filter(filePath => this.tailers.has(filePath)).length;
+    const slots = Math.max(0, maxTailers - (this.tailers.size - ownTailers));
+    const keep = new Set(fresh.slice(0, slots).map(entry => entry.filePath));
+
+    for (const filePath of files) {
+      const tailer = this.tailers.get(filePath);
+      if (tailer && !keep.has(filePath)) {
+        tailer.close();
+        this.tailers.delete(filePath);
+        logger.debug('WORKER', 'Stopped watching transcript file', { file: filePath, watch: watch.name });
+      }
+    }
+
+    for (const filePath of keep) {
+      await this.addTailer(filePath, watch, schema);
+    }
+
+    if (fresh.length > slots) {
+      logger.warn('WORKER', 'Transcript tailer cap reached, skipping older files', {
+        watch: watch.name,
+        maxTailers,
+        fresh: fresh.length,
+        skipped: fresh.length - slots
+      });
+    }
   }
 
   private resolveSchema(watch: WatchTarget): TranscriptSchema | null {
@@ -169,17 +246,16 @@ export class TranscriptWatcher {
   private async addTailer(
     filePath: string,
     watch: WatchTarget,
-    schema: TranscriptSchema,
-    initialDiscovery: boolean
+    schema: TranscriptSchema
   ): Promise<void> {
     if (this.tailers.has(filePath)) return;
 
     const sessionIdOverride = this.extractSessionIdFromPath(filePath);
 
     let offset = this.state.offsets[filePath] ?? 0;
-    // `startAtEnd` is useful on worker startup to avoid replaying the full backlog,
-    // but new transcript files must be read from byte 0 or we lose session_meta/user_message.
-    if (offset === 0 && watch.startAtEnd && initialDiscovery) {
+    // `startAtEnd` is useful for files present at worker startup to avoid replaying the full
+    // backlog, but new transcript files must be read from byte 0 or we lose session_meta/user_message.
+    if (offset === 0 && watch.startAtEnd && this.startupFiles.has(filePath)) {
       try {
         offset = statSync(filePath).size;
       } catch (error: unknown) {
