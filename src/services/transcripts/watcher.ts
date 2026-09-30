@@ -79,11 +79,13 @@ class FileTailer {
     }
 
     this.tailState.offset = size;
-    this.onOffset(this.tailState.offset);
 
     const combined = this.tailState.partial + data;
     const lines = combined.split('\n');
     this.tailState.partial = lines.pop() ?? '';
+    // Persist the start of the unfinished line, so a tailer re-created from
+    // the saved offset (eviction, restart) re-reads it instead of losing it.
+    this.onOffset(size - Buffer.byteLength(this.tailState.partial, 'utf8'));
 
     for (const line of lines) {
       const trimmed = line.trim();
@@ -96,6 +98,9 @@ class FileTailer {
 export class TranscriptWatcher {
   private processor = new TranscriptEventProcessor();
   private tailers = new Map<string, FileTailer>();
+  // Watch name that owns each tailer, so a rescan can close its own tailers
+  // even when their file disappeared from the glob.
+  private tailerWatches = new Map<string, string>();
   private state: TranscriptWatchState;
   private rescanTimers: Array<NodeJS.Timeout> = [];
   // Size of each file present at startup: with `startAtEnd`, a file that only gets a
@@ -123,6 +128,7 @@ export class TranscriptWatcher {
       tailer.close();
     }
     this.tailers.clear();
+    this.tailerWatches.clear();
     for (const timer of this.rescanTimers) {
       clearInterval(timer);
     }
@@ -184,17 +190,18 @@ export class TranscriptWatcher {
     }
     fresh.sort((a, b) => b.mtimeMs - a.mtimeMs);
 
-    const ownTailers = files.filter(filePath => this.tailers.has(filePath)).length;
-    const slots = Math.max(0, maxTailers - (this.tailers.size - ownTailers));
+    const ownTailers = [...this.tailerWatches]
+      .filter(([, watchName]) => watchName === watch.name)
+      .map(([filePath]) => filePath);
+    const slots = Math.max(0, maxTailers - (this.tailers.size - ownTailers.length));
     const keep = new Set(fresh.slice(0, slots).map(entry => entry.filePath));
 
-    for (const filePath of files) {
-      const tailer = this.tailers.get(filePath);
-      if (tailer && !keep.has(filePath)) {
-        tailer.close();
-        this.tailers.delete(filePath);
-        logger.debug('WORKER', 'Stopped watching transcript file', { file: filePath, watch: watch.name });
-      }
+    for (const filePath of ownTailers) {
+      if (keep.has(filePath)) continue;
+      this.tailers.get(filePath)?.close();
+      this.tailers.delete(filePath);
+      this.tailerWatches.delete(filePath);
+      logger.debug('WORKER', 'Stopped watching transcript file', { file: filePath, watch: watch.name });
     }
 
     for (const filePath of keep) {
@@ -279,6 +286,7 @@ export class TranscriptWatcher {
 
     tailer.start();
     this.tailers.set(filePath, tailer);
+    this.tailerWatches.set(filePath, watch.name);
     logger.info('TRANSCRIPT', 'Watching transcript file', {
       file: filePath,
       watch: watch.name,

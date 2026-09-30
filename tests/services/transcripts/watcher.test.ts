@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
-import { appendFileSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'fs';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { SAMPLE_CONFIG } from '../../../src/services/transcripts/config.js';
@@ -147,6 +147,37 @@ describe('TranscriptWatcher tailer limits', () => {
     await waitFor(() => lines.length > 0);
 
     expect(lines).toEqual(['{"new":true}']);
+  });
+
+  it('closes the tailer of a deleted file on rescan and frees its slot', async () => {
+    const now = Date.now();
+    const gone = makeFile('gone.jsonl', now - 60_000);
+    makeFile('waiting.jsonl', now - 120_000);
+
+    const w = createWatcher({ CLAUDE_MEM_TRANSCRIPTS_MAX_TAILERS: '1' }, () => now, 10);
+    await w.start();
+    expect([...tailers(w).keys()]).toEqual([gone]);
+
+    unlinkSync(gone);
+    await waitFor(() => !tailers(w).has(gone) && tailers(w).size === 1);
+
+    expect([...tailers(w).keys()]).toEqual([join(dir, 'waiting.jsonl')]);
+  });
+
+  it('persists the offset before a trailing partial line, so a re-added tailer keeps it', async () => {
+    const now = Date.now();
+    const filePath = join(dir, 'partial.jsonl');
+    writeFileSync(filePath, '{"a":1}\n{"b":');
+
+    const w = createWatcher({}, () => now);
+    const lines: string[] = [];
+    spyOn(w as unknown as { handleLine: (line: string) => Promise<void> }, 'handleLine')
+      .mockImplementation(async (line: string) => { lines.push(line); });
+    await w.start();
+    await waitFor(() => lines.length === 1);
+
+    const state = JSON.parse(readFileSync(join(dir, 'state', 'state.json'), 'utf-8'));
+    expect(state.offsets[filePath]).toBe(Buffer.byteLength('{"a":1}\n'));
   });
 
   it('disables the age filter when max age is 0', async () => {
