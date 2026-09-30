@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
-import { mkdtempSync, rmSync, utimesSync, writeFileSync } from 'fs';
+import { appendFileSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { SAMPLE_CONFIG } from '../../../src/services/transcripts/config.js';
@@ -108,6 +108,45 @@ describe('TranscriptWatcher tailer limits', () => {
 
     expect([...tailers(w).keys()].sort()).toEqual(files.slice(0, 3).sort());
     expect(capWarnings()).toHaveLength(1);
+  });
+
+  it('warns about the cap once while the skipped set is unchanged', async () => {
+    const now = Date.now();
+    for (let i = 0; i < 5; i++) {
+      makeFile(`fresh-${i}.jsonl`, now - (i + 1) * 60_000);
+    }
+
+    const w = createWatcher({ CLAUDE_MEM_TRANSCRIPTS_MAX_TAILERS: '3' }, () => now, 10);
+    await w.start();
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    expect(capWarnings()).toHaveLength(1);
+  });
+
+  it('reads a startup file that turns fresh from its size at startup (startAtEnd)', async () => {
+    const now = Date.now();
+    const filePath = join(dir, 'resumed.jsonl');
+    writeFileSync(filePath, '{"old":true}\n');
+    utimesSync(filePath, (now - 72 * HOUR_MS) / 1000, (now - 72 * HOUR_MS) / 1000);
+
+    const watch: WatchTarget = { name: 'test', path: dir, schema, rescanIntervalMs: 10, startAtEnd: true };
+    const w = new TranscriptWatcher(
+      { version: 1, watches: [watch] },
+      join(dir, 'state', 'state.json'),
+      { getSettings: () => ({}), now: () => now }
+    );
+    watcher = w;
+    const lines: string[] = [];
+    spyOn(w as unknown as { handleLine: (line: string) => Promise<void> }, 'handleLine')
+      .mockImplementation(async (line: string) => { lines.push(line); });
+
+    await w.start();
+    expect(tailers(w).size).toBe(0);
+
+    appendFileSync(filePath, '{"new":true}\n');
+    await waitFor(() => lines.length > 0);
+
+    expect(lines).toEqual(['{"new":true}']);
   });
 
   it('disables the age filter when max age is 0', async () => {

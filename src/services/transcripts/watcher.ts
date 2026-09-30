@@ -98,8 +98,11 @@ export class TranscriptWatcher {
   private tailers = new Map<string, FileTailer>();
   private state: TranscriptWatchState;
   private rescanTimers: Array<NodeJS.Timeout> = [];
-  // Files present at startup; `startAtEnd` applies to them even when they only get a tailer later.
-  private startupFiles = new Set<string>();
+  // Size of each file present at startup: with `startAtEnd`, a file that only gets a
+  // tailer later (it turned fresh) resumes from here instead of replaying its backlog.
+  private startupSizes = new Map<string, number>();
+  // Skipped-file count of the last cap warning per watch, to warn on change only.
+  private capWarnedSkipped = new Map<string, number>();
   private getSettings: () => Partial<WatcherSettings>;
   private now: () => number;
 
@@ -168,14 +171,12 @@ export class TranscriptWatcher {
     const { maxAgeMs, maxTailers } = this.getLimits();
     const now = this.now();
     const files = this.resolveWatchFiles(resolvedPath);
-    if (initialDiscovery) {
-      for (const filePath of files) this.startupFiles.add(filePath);
-    }
 
     const fresh: Array<{ filePath: string; mtimeMs: number }> = [];
     for (const filePath of files) {
       try {
-        const { mtimeMs } = statSync(filePath);
+        const { mtimeMs, size } = statSync(filePath);
+        if (initialDiscovery) this.startupSizes.set(filePath, size);
         if (now - mtimeMs <= maxAgeMs) fresh.push({ filePath, mtimeMs });
       } catch (error: unknown) {
         logger.debug('WORKER', 'Failed to stat transcript file for age check', { file: filePath }, error instanceof Error ? error : undefined);
@@ -200,12 +201,16 @@ export class TranscriptWatcher {
       await this.addTailer(filePath, watch, schema);
     }
 
-    if (fresh.length > slots) {
+    const skipped = Math.max(0, fresh.length - slots);
+    if (skipped === 0) {
+      this.capWarnedSkipped.delete(watch.name);
+    } else if (this.capWarnedSkipped.get(watch.name) !== skipped) {
+      this.capWarnedSkipped.set(watch.name, skipped);
       logger.warn('WORKER', 'Transcript tailer cap reached, skipping older files', {
         watch: watch.name,
         maxTailers,
         fresh: fresh.length,
-        skipped: fresh.length - slots
+        skipped
       });
     }
   }
@@ -255,13 +260,9 @@ export class TranscriptWatcher {
     let offset = this.state.offsets[filePath] ?? 0;
     // `startAtEnd` is useful for files present at worker startup to avoid replaying the full
     // backlog, but new transcript files must be read from byte 0 or we lose session_meta/user_message.
-    if (offset === 0 && watch.startAtEnd && this.startupFiles.has(filePath)) {
-      try {
-        offset = statSync(filePath).size;
-      } catch (error: unknown) {
-        logger.debug('WORKER', 'Failed to stat file for startAtEnd offset', { file: filePath }, error instanceof Error ? error : undefined);
-        offset = 0;
-      }
+    // A startup file tailed later resumes from its startup size, so appends made since are kept.
+    if (offset === 0 && watch.startAtEnd) {
+      offset = this.startupSizes.get(filePath) ?? 0;
     }
 
     const tailer = new FileTailer(

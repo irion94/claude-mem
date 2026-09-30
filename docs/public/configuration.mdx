@@ -63,6 +63,8 @@ See [OpenRouter Provider](usage/openrouter-provider) for detailed configuration,
 | `CLAUDE_MEM_LOG_LEVEL`        | `INFO`                          | Log verbosity (DEBUG, INFO, WARN, ERROR, SILENT) |
 | `CLAUDE_MEM_PYTHON_VERSION`   | `3.13`                          | Python version for chroma-mcp         |
 | `CLAUDE_CODE_PATH`            | _(auto-detect)_                 | Path to Claude Code CLI (for Windows) |
+| `CLAUDE_MEM_TRANSCRIPTS_MAX_AGE_HOURS` | `48` | Transcript watcher tails only files modified within this window; tailers of files that age out are closed on rescan. `0` disables the filter. |
+| `CLAUDE_MEM_TRANSCRIPTS_MAX_TAILERS` | `512` | Hard cap on concurrently tailed transcript files (one file descriptor each), freshest first. |
 
 ## Model Configuration
 
