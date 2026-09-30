@@ -558,7 +558,13 @@ export class SessionRoutes extends BaseRouteHandler {
 
     const { last_assistant_message } = req.body;
 
-    this.sessionManager.queueSummarize(sessionDbId, last_assistant_message);
+    const outcome = this.sessionManager.queueSummarize(sessionDbId, last_assistant_message);
+
+    // SUMMARY_CADENCE=session-end: nothing was queued, no generator to start.
+    if (outcome === 'deferred') {
+      res.json({ status: 'deferred' });
+      return;
+    }
 
     // CRITICAL: Ensure SDK agent is running to consume the queue
     this.ensureGeneratorRunning(sessionDbId, 'summarize');
@@ -766,7 +772,14 @@ export class SessionRoutes extends BaseRouteHandler {
     }
 
     // Queue summarize
-    this.sessionManager.queueSummarize(sessionDbId, last_assistant_message);
+    const outcome = this.sessionManager.queueSummarize(sessionDbId, last_assistant_message);
+
+    // SUMMARY_CADENCE=session-end: nothing was queued, no generator to start.
+    // The summary is produced on the exit flush or after the idle timeout.
+    if (outcome === 'deferred') {
+      res.json({ status: 'deferred' });
+      return;
+    }
 
     // Ensure SDK agent is running
     this.ensureGeneratorRunning(sessionDbId, 'summarize');

@@ -175,4 +175,143 @@ describe('SessionManager observation batching', () => {
     expect(flushes).toEqual([sessionDbId, sessionDbId]);
     expect(manager.consumeFlushReason(sessionDbId)).toBe('count');
   });
+
+  // deleteSession reaps supervisor-tracked processes of the live install, so
+  // tests that reach it (reaper, shutdown) record the call instead.
+  const stubDeleteSession = (): number[] => {
+    const deleted: number[] = [];
+    (manager as unknown as { deleteSession: (id: number) => Promise<void> }).deleteSession = async id => {
+      deleted.push(id);
+    };
+    return deleted;
+  };
+
+  describe('SUMMARY_CADENCE', () => {
+    const IDLE_DEFAULT_MS = 1_800_000;
+    const idleTimers = () => timers.filter(timer => timer.delay === IDLE_DEFAULT_MS);
+
+    test('every-stop (default) queues a summarize row per request', () => {
+      expect(manager.queueSummarize(sessionDbId, 'one')).toBe('queued');
+      expect(store.getPendingCount(sessionDbId)).toBe(1);
+    });
+
+    test('session-end defers summarize: no row, no flush, idle timer armed', () => {
+      settings.CLAUDE_MEM_SUMMARY_CADENCE = 'session-end';
+
+      expect(manager.queueSummarize(sessionDbId, 'first')).toBe('deferred');
+      expect(manager.queueSummarize(sessionDbId, 'latest')).toBe('deferred');
+
+      expect(store.getPendingCount(sessionDbId)).toBe(0);
+      expect(flushes).toHaveLength(0);
+      expect(manager.isFlushReady(sessionDbId)).toBe(false);
+      expect(manager.getSession(sessionDbId)?.summaryRequested).toBe(true);
+      expect(idleTimers()).toHaveLength(2);
+      expect(idleTimers()[0].cleared).toBe(true);
+      expect(idleTimers()[1].cleared).toBe(false);
+    });
+
+    test('session-end exit flush materializes one summary with the latest message', async () => {
+      settings.CLAUDE_MEM_SUMMARY_CADENCE = 'session-end';
+      manager.queueSummarize(sessionDbId, 'first');
+      manager.queueSummarize(sessionDbId, 'latest');
+
+      const done = manager.flushAndWait(sessionDbId, 'exit');
+
+      expect(flushes).toEqual([sessionDbId]);
+      expect(manager.consumeFlushReason(sessionDbId)).toBe('exit');
+      expect(idleTimers().every(timer => timer.cleared)).toBe(true);
+      const batch = store.claimPendingBatch(sessionDbId);
+      expect(batch.map(message => message.message_type)).toEqual(['summarize']);
+      expect(batch[0].last_assistant_message).toBe('latest');
+
+      batch.forEach(message => store.confirmProcessed(message.id));
+      manager.notifyQueueProcessed(sessionDbId);
+      await done;
+    });
+
+    test('session-end exit flush carries pending observations and the summary together', async () => {
+      settings.CLAUDE_MEM_SUMMARY_CADENCE = 'session-end';
+      queueObservation('Read');
+      manager.queueSummarize(sessionDbId, 'latest');
+
+      const done = manager.flushAndWait(sessionDbId, 'exit');
+      const batch = store.claimPendingBatch(sessionDbId);
+      expect(batch.map(message => message.message_type)).toEqual(['observation', 'summarize']);
+
+      batch.forEach(message => store.confirmProcessed(message.id));
+      manager.notifyQueueProcessed(sessionDbId);
+      await done;
+    });
+
+    test('session-end idle timer materializes and flushes the deferred summary', () => {
+      settings.CLAUDE_MEM_SUMMARY_CADENCE = 'session-end';
+      settings.CLAUDE_MEM_SUMMARY_IDLE_SEC = '60';
+      manager.queueSummarize(sessionDbId, 'latest');
+
+      const idle = timers.at(-1)!;
+      expect(idle.delay).toBe(60_000);
+      idle.callback();
+
+      expect(flushes).toEqual([sessionDbId]);
+      expect(manager.consumeFlushReason(sessionDbId)).toBe('idle');
+      const batch = store.claimPendingBatch(sessionDbId);
+      expect(batch.map(message => message.message_type)).toEqual(['summarize']);
+      expect(batch[0].last_assistant_message).toBe('latest');
+    });
+
+    test('session-end summary is produced once even if exit follows the idle flush', async () => {
+      settings.CLAUDE_MEM_SUMMARY_CADENCE = 'session-end';
+      manager.queueSummarize(sessionDbId, 'latest');
+      idleTimers()[0].callback();
+      store.claimPendingBatch(sessionDbId).forEach(message => store.confirmProcessed(message.id));
+
+      await manager.flushAndWait(sessionDbId, 'exit');
+
+      expect(store.getPendingCount(sessionDbId)).toBe(0);
+    });
+
+    test('session-end observation activity re-arms the idle timer', () => {
+      settings.CLAUDE_MEM_SUMMARY_CADENCE = 'session-end';
+      manager.queueSummarize(sessionDbId, 'latest');
+      expect(idleTimers()).toHaveLength(1);
+
+      queueObservation('Read');
+
+      expect(idleTimers()).toHaveLength(2);
+      expect(idleTimers()[0].cleared).toBe(true);
+      expect(idleTimers()[1].cleared).toBe(false);
+    });
+
+    test('session-end reaper keeps a session whose summary is still deferred', async () => {
+      settings.CLAUDE_MEM_SUMMARY_CADENCE = 'session-end';
+      const deleted = stubDeleteSession();
+      manager.queueSummarize(sessionDbId, 'latest');
+      manager.getSession(sessionDbId)!.startTime = 0;
+
+      expect(await manager.reapStaleSessions()).toBe(0);
+      expect(deleted).toEqual([]);
+    });
+
+    test('session-end shutdown persists a deferred summary for the startup flush', async () => {
+      settings.CLAUDE_MEM_SUMMARY_CADENCE = 'session-end';
+      const deleted = stubDeleteSession();
+      manager.queueSummarize(sessionDbId, 'latest');
+
+      await manager.shutdownAll();
+
+      expect(deleted).toEqual([sessionDbId]);
+      const batch = store.claimPendingBatch(sessionDbId);
+      expect(batch.map(message => message.message_type)).toEqual(['summarize']);
+      expect(batch[0].last_assistant_message).toBe('latest');
+    });
+
+    test('removing a session clears its deferred summary idle timer', () => {
+      settings.CLAUDE_MEM_SUMMARY_CADENCE = 'session-end';
+      manager.queueSummarize(sessionDbId, 'latest');
+
+      manager.removeSessionImmediate(sessionDbId);
+
+      expect(idleTimers()[0].cleared).toBe(true);
+    });
+  });
 });
