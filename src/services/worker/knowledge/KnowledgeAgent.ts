@@ -15,7 +15,7 @@ import { CorpusRenderer } from './CorpusRenderer.js';
 import type { CorpusFile, QueryResult } from './types.js';
 import { logger } from '../../../utils/logger.js';
 import { SettingsDefaultsManager } from '../../../shared/SettingsDefaultsManager.js';
-import { USER_SETTINGS_PATH, OBSERVER_SESSIONS_DIR, ensureDir } from '../../../shared/paths.js';
+import { USER_SETTINGS_PATH, OBSERVER_SESSIONS_DIR, ensureDir, resolvePluginRelativePath } from '../../../shared/paths.js';
 import { buildIsolatedEnv } from '../../../shared/EnvManager.js';
 import { sanitizeEnv } from '../../../supervisor/env-sanitizer.js';
 
@@ -246,11 +246,12 @@ export class KnowledgeAgent {
 
     // 1. Check configured path
     if (settings.CLAUDE_CODE_PATH) {
+      const claudeCodePath = resolvePluginRelativePath(settings.CLAUDE_CODE_PATH);
       const { existsSync } = require('fs');
-      if (!existsSync(settings.CLAUDE_CODE_PATH)) {
-        throw new Error(`CLAUDE_CODE_PATH is set to "${settings.CLAUDE_CODE_PATH}" but the file does not exist.`);
+      if (!existsSync(claudeCodePath)) {
+        throw new Error(`CLAUDE_CODE_PATH is set to "${settings.CLAUDE_CODE_PATH}" but the file does not exist: ${claudeCodePath}`);
       }
-      return settings.CLAUDE_CODE_PATH;
+      return claudeCodePath;
     }
 
     // 2. On Windows, prefer "claude.cmd" via PATH

@@ -16,7 +16,7 @@ import { SessionManager } from './SessionManager.js';
 import { logger } from '../../utils/logger.js';
 import { buildInitPrompt, buildObservationPrompt, buildSummaryPrompt, buildContinuationPrompt } from '../../sdk/prompts.js';
 import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
-import { USER_SETTINGS_PATH, OBSERVER_SESSIONS_DIR, ensureDir } from '../../shared/paths.js';
+import { USER_SETTINGS_PATH, OBSERVER_SESSIONS_DIR, ensureDir, resolvePluginRelativePath } from '../../shared/paths.js';
 import { buildIsolatedEnv, getAuthMethodDescription } from '../../shared/EnvManager.js';
 import type { ActiveSession, SDKUserMessage } from '../worker-types.js';
 import { ModeManager } from '../domain/ModeManager.js';
@@ -445,12 +445,13 @@ export class SDKAgent {
 
     // 1. Check configured path
     if (settings.CLAUDE_CODE_PATH) {
+      const claudeCodePath = resolvePluginRelativePath(settings.CLAUDE_CODE_PATH);
       // Lazy load fs to keep startup fast
       const { existsSync } = require('fs');
-      if (!existsSync(settings.CLAUDE_CODE_PATH)) {
-        throw new Error(`CLAUDE_CODE_PATH is set to "${settings.CLAUDE_CODE_PATH}" but the file does not exist.`);
+      if (!existsSync(claudeCodePath)) {
+        throw new Error(`CLAUDE_CODE_PATH is set to "${settings.CLAUDE_CODE_PATH}" but the file does not exist: ${claudeCodePath}`);
       }
-      return settings.CLAUDE_CODE_PATH;
+      return claudeCodePath;
     }
 
     // 2. On Windows, prefer "claude.cmd" via PATH to avoid spawn issues with spaces in paths
