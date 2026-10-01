@@ -166,14 +166,28 @@ export function getPackageRoot(): string {
 }
 
 /**
+ * Directory of the running worker bundle: the native CJS `__dirname` first,
+ * then the directory of `process.argv[1]` when it is worker-service.cjs.
+ * Never `import.meta.url`, which is an empty object in the CJS bundle.
+ */
+export function runningBundleDir(
+  nativeDirname: string | null = typeof __dirname !== 'undefined' ? __dirname : null,
+  entry: string = process.argv[1] ?? ''
+): string {
+  if (nativeDirname) return nativeDirname;
+  if (entry.endsWith('worker-service.cjs')) return dirname(entry);
+  throw new Error(`Cannot locate the running bundle directory (argv[1]=${entry || 'unset'})`);
+}
+
+/**
  * Resolve a settings path that starts with `@plugin/` against the directory
  * of the running bundle (plugin/scripts/), so a value like
  * `@plugin/omlx-claude-shim.py` follows the plugin cache across versions.
  * Any other value is returned unchanged.
  */
-export function resolvePluginRelativePath(value: string, scriptsDir: string = _dirname): string {
+export function resolvePluginRelativePath(value: string, scriptsDir?: string): string {
   const prefix = '@plugin/';
-  return value.startsWith(prefix) ? join(scriptsDir, value.slice(prefix.length)) : value;
+  return value.startsWith(prefix) ? join(scriptsDir ?? runningBundleDir(), value.slice(prefix.length)) : value;
 }
 
 /**

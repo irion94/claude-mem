@@ -6,7 +6,7 @@
 
 import { describe, it, expect } from 'bun:test';
 import { join } from 'path';
-import { resolvePluginRelativePath } from '../../src/shared/paths.js';
+import { resolvePluginRelativePath, runningBundleDir } from '../../src/shared/paths.js';
 
 describe('resolvePluginRelativePath', () => {
   const scriptsDir = '/cache/irion94/claude-mem/12.3.9-baton.4/scripts';
@@ -26,5 +26,22 @@ describe('resolvePluginRelativePath', () => {
     expect(resolvePluginRelativePath('/usr/local/bin/claude', scriptsDir)).toBe('/usr/local/bin/claude');
     expect(resolvePluginRelativePath('claude', scriptsDir)).toBe('claude');
     expect(resolvePluginRelativePath('plugin/x.py', scriptsDir)).toBe('plugin/x.py');
+  });
+});
+
+describe('runningBundleDir', () => {
+  const scripts = '/cache/irion94/claude-mem/12.3.9-baton.5/scripts';
+
+  it('prefers the native CJS __dirname', () => {
+    expect(runningBundleDir(scripts, '/elsewhere/worker-service.cjs')).toBe(scripts);
+  });
+
+  it('falls back to the directory of argv[1] when it is worker-service.cjs', () => {
+    expect(runningBundleDir(null, `${scripts}/worker-service.cjs`)).toBe(scripts);
+  });
+
+  it('refuses any other entry instead of guessing', () => {
+    expect(() => runningBundleDir(null, '/usr/bin/some-cli.js')).toThrow('Cannot locate');
+    expect(() => runningBundleDir(null, '')).toThrow('Cannot locate');
   });
 });
