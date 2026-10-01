@@ -61,6 +61,8 @@ import {
   httpShutdown
 } from './infrastructure/HealthMonitor.js';
 import { performGracefulShutdown } from './infrastructure/GracefulShutdown.js';
+import { HANDOFF_ENV, chooseInstalledWorkerScript, readBundleVersion } from './infrastructure/WorkerHandoff.js';
+import { CLAUDE_CONFIG_DIR } from '../shared/paths.js';
 import { adoptMergedWorktrees, adoptMergedWorktreesForAllKnownRepos } from './infrastructure/WorktreeAdoption.js';
 import { SessionStore, type ObserverJunkReapCounts } from './sqlite/SessionStore.js';
 
@@ -1465,6 +1467,9 @@ async function main() {
 
     case '--daemon':
     default: {
+      const ownVersion = readBundleVersion(path.dirname(path.dirname(__filename)));
+      logger.info('SYSTEM', `Worker boot ${ownVersion}`, { script: __filename, handoffFrom: process.env[HANDOFF_ENV] });
+
       // GUARD 1: Refuse to start if another worker is already alive.
       // Verifies PID *identity* (via start-time token) not just liveness, so a
       // stale PID file pointing at a PID that's since been reused by an
@@ -1488,6 +1493,19 @@ async function main() {
       if (await isPortInUse(port)) {
         logger.info('SYSTEM', 'Port already in use, refusing to start duplicate', { port });
         process.exit(0);
+      }
+
+      // Hand off to the installed bundle when an older session spawned us (at most once).
+      if (!process.env[HANDOFF_ENV]) {
+        const installedPlugins = path.join(CLAUDE_CONFIG_DIR, 'plugins', 'installed_plugins.json');
+        const target = chooseInstalledWorkerScript(__filename, installedPlugins);
+        if (target) {
+          const targetVersion = readBundleVersion(path.dirname(path.dirname(target)));
+          logger.info('SYSTEM', `Worker handoff ${ownVersion} -> ${targetVersion}`, { from: __filename, to: target });
+          const pid = spawnDaemon(target, port, { [HANDOFF_ENV]: ownVersion });
+          if (pid !== undefined) process.exit(0);
+          logger.error('SYSTEM', 'Worker handoff spawn failed, starting own bundle', { to: target });
+        }
       }
 
       // Prevent daemon from dying silently on unhandled errors.
