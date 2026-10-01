@@ -10,7 +10,7 @@
   "plugins": [
     {
       "name": "claude-mem",
-      "version": "12.3.9-baton.4",
+      "version": "12.3.9-baton.5",
       "source": "./plugin",
       "description": "Persistent memory system for Claude Code - baton fork (configurable session age guard)"
     }

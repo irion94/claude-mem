@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [12.3.9-baton.5] - 2026-10-01
+
+### Fixed
+
+- A worker daemon spawned from an outdated plugin cache dir hands off to the
+  installed version from `installed_plugins.json` before binding, and logs
+  `Worker handoff <own> -> <installed>`. Long-lived Claude Code sessions pin
+  their plugin root at start, so after an update their hooks resurrected the
+  old bundle whenever the worker was down (baton.2 without the `@plugin/`
+  resolver, 2026-10-01). The handoff happens at most once.
+- The daemon logs its own version in its first line (`Worker boot <version>`).
+- The `@plugin/` resolver uses the native CJS `__dirname`, then the directory
+  of `process.argv[1]` when it is `worker-service.cjs`, and never
+  `import.meta.url`.
+- The oMLX shim writes to fd 1 when `sys.stdout` is `None` instead of failing
+  with `AttributeError`.
+
 ## [12.3.9-baton.4] - 2026-10-01
 
 ### Added
