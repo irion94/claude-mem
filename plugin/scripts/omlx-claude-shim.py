@@ -122,6 +122,8 @@ def log(kind: str, payload: str) -> None:
 
 
 def emit(event: dict) -> None:
+    if sys.stdout is None:  # spawned without a stdout object: write fd 1 directly
+        sys.stdout = os.fdopen(1, "w")
     sys.stdout.write(json.dumps(event, ensure_ascii=False) + "\n")
     sys.stdout.flush()
 

@@ -465,5 +465,19 @@ start_server echoclean "$(ok "$ECHO_CLEAN")"
 run_shim echoclean "$SRV_URL" s-echoclean "$INIT" "$OBS"
 check "field echo: clean block untouched" "$ECHO_CLEAN" "$(result_at 1)"
 
+# 33. emit() survives sys.stdout = None (seen when spawned without a usable
+#     stdout object): it falls back to fd 1.
+got="$(CLAUDE_MEM_DATA_DIR="$TMP/emit-mem" OMLX_SHIM_NOTIFY=0 PYTHONDONTWRITEBYTECODE=1 python3 -c '
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("shim", sys.argv[1])
+shim = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(shim)
+sys.stdout = None
+shim.emit({"type": "probe"})
+shim.emit({"type": "probe2"})
+' "$SHIM" 2>&1)"
+check "emit: stdout None falls back to fd 1" '{"type": "probe"}
+{"type": "probe2"}' "$got"
+
 echo "PASS=$pass FAIL=$fail"
 [ "$fail" -eq 0 ]
