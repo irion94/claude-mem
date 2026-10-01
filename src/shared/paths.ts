@@ -166,6 +166,17 @@ export function getPackageRoot(): string {
 }
 
 /**
+ * Resolve a settings path that starts with `@plugin/` against the directory
+ * of the running bundle (plugin/scripts/), so a value like
+ * `@plugin/omlx-claude-shim.py` follows the plugin cache across versions.
+ * Any other value is returned unchanged.
+ */
+export function resolvePluginRelativePath(value: string, scriptsDir: string = _dirname): string {
+  const prefix = '@plugin/';
+  return value.startsWith(prefix) ? join(scriptsDir, value.slice(prefix.length)) : value;
+}
+
+/**
  * Find commands directory in the installed package
  */
 export function getPackageCommandsDir(): string {
